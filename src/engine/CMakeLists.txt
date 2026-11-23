@@ -19,13 +19,12 @@ if(MSVC)
     target_compile_definitions(PDFVisor.Engine PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
 endif()
 
-# Copy pdfium.dll and qpdf30.dll next to PDFVisor.Engine.dll after build
+# Copy pdfium.dll, qpdf30.dll and QPDF's bundled MSVC runtime DLLs next to PDFVisor.Engine.dll
+file(GLOB QPDF_RUNTIME_DLLS "${QPDF_ROOT}/bin/*.dll")
 add_custom_command(TARGET PDFVisor.Engine POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:pdfium>
+        ${QPDF_RUNTIME_DLLS}
         $<TARGET_FILE_DIR:PDFVisor.Engine>
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-        $<TARGET_FILE:qpdf>
-        $<TARGET_FILE_DIR:PDFVisor.Engine>
-    COMMENT "Copying pdfium.dll and qpdf30.dll to output directory"
+    COMMENT "Copying pdfium.dll, qpdf30.dll and runtime DLLs to output directory"
 )

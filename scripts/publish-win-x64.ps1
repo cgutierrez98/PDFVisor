@@ -41,8 +41,6 @@ dotnet publish "$RepoRoot\src\workers\PDFVisor.OcrWorker\PDFVisor.OcrWorker.cspr
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish PDFVisor.OcrWorker failed" }
 
 Write-Host "=== 5. Ensuring native DLLs in publish root ==="
-Copy-Item "$RepoRoot\build\src\engine\Release\PDFVisor.Engine.dll" "$OutputDir\" -Force
-Copy-Item "$RepoRoot\build\src\engine\Release\pdfium.dll" "$OutputDir\" -Force
-Copy-Item "$RepoRoot\build\src\engine\Release\qpdf30.dll" "$OutputDir\" -Force
+Copy-Item "$RepoRoot\build\src\engine\Release\*.dll" "$OutputDir\" -Force
 
 Write-Host "Publish complete: $OutputDir"

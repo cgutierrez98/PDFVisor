@@ -5,14 +5,8 @@
   </PropertyGroup>
 
   <ItemGroup Condition="Exists('$(NativeEngineDir)PDFVisor.Engine.dll')">
-    <Content Include="$(NativeEngineDir)PDFVisor.Engine.dll" Link="PDFVisor.Engine.dll">
+    <None Include="$(NativeEngineDir)*.dll" Link="%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="$(NativeEngineDir)pdfium.dll" Link="pdfium.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
-    <Content Include="$(NativeEngineDir)qpdf30.dll" Link="qpdf30.dll" Condition="Exists('$(NativeEngineDir)qpdf30.dll')">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
+    </None>
   </ItemGroup>
 </Project>
