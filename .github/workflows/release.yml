@@ -1,0 +1,87 @@
+name: Release — Windows x64 Installer
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.8.0)'
+        required: true
+        default: '0.8.0'
+
+permissions:
+  contents: write
+
+jobs:
+  package-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: ver
+        shell: pwsh
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $v = "${{ inputs.version }}"
+          } else {
+            $v = "${{ github.ref_name }}".TrimStart('v')
+          }
+          echo "version=$v" >> $env:GITHUB_OUTPUT
+
+      - name: Setup .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Fetch PDFium & QPDF binaries
+        shell: pwsh
+        run: |
+          .\scripts\fetch-pdfium.ps1
+          .\scripts\fetch-qpdf.ps1
+
+      - name: Build & Run Tests
+        shell: pwsh
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release
+          dotnet build PDFVisor.slnx -c Release
+          dotnet test PDFVisor.slnx -c Release --no-build --verbosity normal
+
+      - name: Publish win-x64 Self-Contained Bundle
+        shell: pwsh
+        run: .\scripts\publish-win-x64.ps1 -Version "${{ steps.ver.outputs.version }}"
+
+      - name: Create Portable ZIP
+        shell: pwsh
+        run: Compress-Archive -Path "dist\win-x64\*" -DestinationPath "dist\PDFVisor-${{ steps.ver.outputs.version }}-win-x64-portable.zip" -Force
+
+      - name: Build Windows Installer (Inno Setup 6)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+          }
+          & $iscc "/DMyAppVersion=${{ steps.ver.outputs.version }}" "installer\PDFVisor.iss"
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: PDFVisor-win-x64-${{ steps.ver.outputs.version }}
+          path: |
+            dist/installer/*.exe
+            dist/*.zip
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/installer/*.exe
+            dist/*.zip
+          generate_release_notes: true
