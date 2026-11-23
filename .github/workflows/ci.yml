@@ -43,7 +43,10 @@ jobs:
 
       - name: Build .NET 10 Solution (Release)
         shell: pwsh
-        run: dotnet build PDFVisor.slnx -c Release
+        run: |
+          dotnet build PDFVisor.slnx -c Release
+          Write-Host "=== Native DLLs in test output ==="
+          Get-ChildItem tests\desktop-tests\bin\Release\net10.0-windows\*.dll | Select-Object Name, Length
 
       - name: Run End-to-End Tests (xUnit)
         shell: pwsh
