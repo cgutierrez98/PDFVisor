@@ -73,6 +73,17 @@ jobs:
           }
           & $iscc "/DMyAppVersion=${{ steps.ver.outputs.version }}" "installer\PDFVisor.iss"
 
+      - name: Generate SHA-256 Checksums
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem "dist\installer\*.exe") + @(Get-ChildItem "dist\*.zip")
+          $lines = foreach ($f in $files) {
+            $hash = (Get-FileHash -Path $f.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $($f.Name)"
+          }
+          $lines | Set-Content -Path "dist\checksums.sha256" -Encoding ascii
+          Get-Content "dist\checksums.sha256"
+
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -80,6 +91,7 @@ jobs:
           path: |
             dist/installer/*.exe
             dist/*.zip
+            dist/checksums.sha256
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
@@ -88,4 +100,5 @@ jobs:
           files: |
             dist/installer/*.exe
             dist/*.zip
+            dist/checksums.sha256
           generate_release_notes: true

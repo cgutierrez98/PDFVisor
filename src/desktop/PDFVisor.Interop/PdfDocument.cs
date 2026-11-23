@@ -43,6 +43,21 @@ public sealed class PdfDocument : IDisposable
         return new PdfDocument(filePath, password, new PdfDocumentSafeHandle(rawHandle));
     }
 
+    public static PdfDocument CreateBlank(double widthPt = 595.0, double heightPt = 842.0)
+    {
+        var status = NativeMethods.pv_doc_create_blank(widthPt, heightPt, out var rawHandle);
+        PdfEngine.ThrowIfFailed(status);
+        return new PdfDocument(string.Empty, null, new PdfDocumentSafeHandle(rawHandle));
+    }
+
+    public int AppendBlankPage(double widthPt = 595.0, double heightPt = 842.0)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_doc_append_blank_page(_handle.DangerousGetHandle(), widthPt, heightPt, out int idx);
+        PdfEngine.ThrowIfFailed(status);
+        return idx;
+    }
+
     public PvPageSize GetPageSize(int pageIndex)
     {
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
@@ -161,10 +176,11 @@ public sealed class PdfDocument : IDisposable
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
 
-        bool sameFile = string.Equals(
-            Path.GetFullPath(destinationPath),
-            Path.GetFullPath(FilePath),
-            StringComparison.OrdinalIgnoreCase);
+        bool sameFile = !string.IsNullOrWhiteSpace(FilePath) &&
+            string.Equals(
+                Path.GetFullPath(destinationPath),
+                Path.GetFullPath(FilePath),
+                StringComparison.OrdinalIgnoreCase);
 
         if (sameFile)
         {

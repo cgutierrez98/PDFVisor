@@ -529,6 +529,55 @@ public sealed class EngineSmokeTests : IDisposable
         Assert.False(older.IsUpdateAvailable);
     }
 
+    [Fact]
+    public void Production_Sha256Verification_AppSettings_And_CreatePdfFromImages()
+    {
+        // 1. Verify SHA-256 updater checksum validation (pass + tamper fail)
+        string dummyExe = Path.Combine(Path.GetTempPath(), $"PDFVisor-Setup-1.1.0-win-x64_{Guid.NewGuid():N}.exe");
+        _tempFiles.Add(dummyExe);
+        File.WriteAllBytes(dummyExe, Encoding.UTF8.GetBytes("PDFVisor installer payload"));
+        string actualHash = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(dummyExe))).ToLowerInvariant();
+        string fileName = Path.GetFileName(dummyExe);
+
+        string validManifest = $"{actualHash}  {fileName}\n";
+        Assert.True(UpdateService.VerifySha256Checksum(dummyExe, fileName, validManifest));
+        Assert.False(UpdateService.VerifySha256Checksum(dummyExe, fileName, "0000000000000000  " + fileName));
+
+        // 2. Verify AppSettings round-trip
+        string settingsFile = Path.Combine(Path.GetTempPath(), $"pdfvisor_settings_{Guid.NewGuid():N}.json");
+        _tempFiles.Add(settingsFile);
+        var s = new AppSettings { WindowWidth = 1520, WindowHeight = 910, IsMaximized = true, IsSidebarOpen = false, DarkReadingMode = true };
+        s.Save(settingsFile);
+        var loaded = AppSettings.Load(settingsFile);
+        Assert.Equal(1520, loaded.WindowWidth);
+        Assert.Equal(910, loaded.WindowHeight);
+        Assert.True(loaded.IsMaximized);
+        Assert.False(loaded.IsSidebarOpen);
+        Assert.True(loaded.DarkReadingMode);
+
+        // 3. Verify CreateBlank + AppendBlankPage + AddImageBgra -> 2-page PDF from images
+        string outPdf = Path.Combine(Path.GetTempPath(), $"pdfvisor_imgs_{Guid.NewGuid():N}.pdf");
+        _tempFiles.Add(outPdf);
+        byte[] img = new byte[16 * 16 * 4];
+        for (int i = 0; i < img.Length; i += 4) { img[i] = 50; img[i + 1] = 180; img[i + 2] = 90; img[i + 3] = 255; }
+
+        using (var created = PdfDocument.CreateBlank(400, 300))
+        {
+            created.AddImageBgra(0, img, 16, 16, new PvRect { Left = 0, Bottom = 0, Right = 400, Top = 300 });
+            int p2 = created.AppendBlankPage(300, 500);
+            Assert.Equal(1, p2);
+            created.AddImageBgra(p2, img, 16, 16, new PvRect { Left = 0, Bottom = 0, Right = 300, Top = 500 });
+            created.SaveAs(outPdf);
+        }
+
+        using (var reopened = PdfDocument.Open(outPdf))
+        {
+            Assert.Equal(2, reopened.PageCount);
+            Assert.Contains(reopened.GetPageObjects(0), o => o.Type == PdfPageObjectType.Image);
+            Assert.Contains(reopened.GetPageObjects(1), o => o.Type == PdfPageObjectType.Image);
+        }
+    }
+
     private static byte[] BuildMinimalValidPdf(string text)
     {
         var sb = new StringBuilder();

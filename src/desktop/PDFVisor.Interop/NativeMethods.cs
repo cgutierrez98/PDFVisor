@@ -153,6 +153,12 @@ internal static class NativeMethods
         out nint outDoc);
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_doc_create_blank(double widthPt, double heightPt, out nint outDoc);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_doc_append_blank_page(nint doc, double widthPt, double heightPt, out int outPageIndex);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void pv_doc_close(nint doc);
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]

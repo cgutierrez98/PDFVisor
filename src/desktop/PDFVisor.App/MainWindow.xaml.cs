@@ -15,6 +15,7 @@ namespace PDFVisor.App;
 public partial class MainWindow : Window
 {
     private readonly WorkspaceViewModel _workspace = new();
+    private readonly AppSettings _settings;
     private DocumentSession? _boundSession;
     private CancellationTokenSource? _thumbCts;
     private UpdateInfo? _pendingUpdate;
@@ -24,6 +25,9 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        _settings = AppSettings.Load();
+        ApplySavedSettings();
+
         DocumentTabs.ItemsSource = _workspace.OpenSessions;
         _workspace.PropertyChanged += Workspace_PropertyChanged;
         PdfViewport.PromptNoteText = () => PromptInput("Añadir nota adhesiva", "Escribe el texto de la nota:");
@@ -40,6 +44,39 @@ public partial class MainWindow : Window
             _ = CheckUpdatesInBackgroundAsync(silent: true);
         };
         UpdateUiState();
+    }
+
+    private void ApplySavedSettings()
+    {
+        if (_settings.WindowWidth >= MinWidth) Width = _settings.WindowWidth;
+        if (_settings.WindowHeight >= MinHeight) Height = _settings.WindowHeight;
+        if (_settings.WindowLeft.HasValue && _settings.WindowTop.HasValue)
+        {
+            WindowStartupLocation = WindowStartupLocation.Manual;
+            Left = _settings.WindowLeft.Value;
+            Top = _settings.WindowTop.Value;
+        }
+        if (_settings.IsMaximized) WindowState = WindowState.Maximized;
+        SetSidebarOpen(_settings.IsSidebarOpen);
+    }
+
+    private void SaveCurrentSettings()
+    {
+        _settings.IsMaximized = WindowState == WindowState.Maximized;
+        if (WindowState == WindowState.Normal)
+        {
+            _settings.WindowWidth = Width;
+            _settings.WindowHeight = Height;
+            _settings.WindowLeft = Left;
+            _settings.WindowTop = Top;
+        }
+        _settings.IsSidebarOpen = _isSidebarOpen;
+        if (_boundSession is not null)
+        {
+            _settings.DarkReadingMode = _boundSession.DarkReadingMode;
+            _settings.DefaultZoom = _boundSession.Zoom;
+        }
+        _settings.Save();
     }
 
     protected override void OnClosing(CancelEventArgs e)
@@ -74,6 +111,7 @@ public partial class MainWindow : Window
                 }
             }
         }
+        SaveCurrentSettings();
         base.OnClosing(e);
     }
 
@@ -253,6 +291,7 @@ public partial class MainWindow : Window
         BtnSave.IsEnabled = hasDoc && session!.IsModified;
         MenuSave.IsEnabled = BtnSave.IsEnabled;
         MenuSaveAs.IsEnabled = hasDoc;
+        MenuExportImage.IsEnabled = hasDoc;
         MenuOptimize.IsEnabled = hasDoc;
         MenuPrint.IsEnabled = hasDoc;
         BtnPrint.IsEnabled = hasDoc;
@@ -643,6 +682,124 @@ public partial class MainWindow : Window
             "Acerca de PDFVisor",
             MessageBoxButton.OK,
             MessageBoxImage.Information);
+    }
+
+    private void MenuReportIssue_Click(object sender, RoutedEventArgs e)
+    {
+        string ver = UpdateService.GetCurrentVersion().ToString();
+        string os = Environment.OSVersion.VersionString;
+        string body = Uri.EscapeDataString($"**Versión:** PDFVisor v{ver}\n**Sistema:** {os}\n\n### Descripción del problema\n");
+        string url = $"https://github.com/{UpdateService.DefaultOwner}/{UpdateService.DefaultRepo}/issues/new?body={body}";
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(url) { UseShellExecute = true });
+    }
+
+    private void MenuOpenLogs_Click(object sender, RoutedEventArgs e)
+    {
+        string dir = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "PDFVisor",
+            "logs");
+        System.IO.Directory.CreateDirectory(dir);
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir) { UseShellExecute = true });
+    }
+
+    private void MenuExportImage_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null || _boundSession.PageCount == 0) return;
+        var dlg = new SaveFileDialog
+        {
+            Title = $"Exportar página {_boundSession.CurrentPageNumber} como imagen",
+            Filter = "Imagen PNG (*.png)|*.png|Imagen JPEG (*.jpg)|*.jpg",
+            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_p{_boundSession.CurrentPageNumber}.png"
+        };
+        if (dlg.ShowDialog(this) != true) return;
+
+        try
+        {
+            var pageInfo = _boundSession.Pages[_boundSession.CurrentPageIndex];
+            const double exportDpi = 200.0;
+            int wPx = Math.Clamp((int)Math.Round(pageInfo.WidthPt * (exportDpi / 72.0)), 1, 8192);
+            int hPx = Math.Clamp((int)Math.Round(pageInfo.HeightPt * (exportDpi / 72.0)), 1, 8192);
+            byte[] bgra = _boundSession.Document.RenderPageBgra(_boundSession.CurrentPageIndex, wPx, hPx);
+
+            var bmp = BitmapSource.Create(wPx, hPx, exportDpi, exportDpi, PixelFormats.Bgra32, null, bgra, wPx * 4);
+            BitmapEncoder encoder = dlg.FileName.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                ? new JpegBitmapEncoder { QualityLevel = 92 }
+                : new PngBitmapEncoder();
+            encoder.Frames.Add(BitmapFrame.Create(bmp));
+            using var fs = System.IO.File.Create(dlg.FileName);
+            encoder.Save(fs);
+            StatusMessage.Text = $"Página exportada: {System.IO.Path.GetFileName(dlg.FileName)}";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error al exportar imagen:\n{ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void MenuCreateFromImages_Click(object sender, RoutedEventArgs e)
+    {
+        var openDlg = new OpenFileDialog
+        {
+            Title = "Seleccionar imágenes para crear un PDF",
+            Filter = "Imágenes (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp",
+            Multiselect = true
+        };
+        if (openDlg.ShowDialog(this) != true || openDlg.FileNames.Length == 0) return;
+
+        var saveDlg = new SaveFileDialog
+        {
+            Title = "Guardar nuevo PDF",
+            Filter = "Documentos PDF (*.pdf)|*.pdf",
+            FileName = "documento_imagenes.pdf"
+        };
+        if (saveDlg.ShowDialog(this) != true) return;
+
+        try
+        {
+            PdfDocument? created = null;
+            try
+            {
+                for (int i = 0; i < openDlg.FileNames.Length; i++)
+                {
+                    var bmp = new BitmapImage(new Uri(openDlg.FileNames[i]));
+                    var formatted = new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
+                    int w = formatted.PixelWidth;
+                    int h = formatted.PixelHeight;
+                    byte[] pixels = new byte[w * h * 4];
+                    formatted.CopyPixels(pixels, w * 4, 0);
+
+                    double wPt = w * 72.0 / 96.0;
+                    double hPt = h * 72.0 / 96.0;
+                    int pageIdx;
+                    if (created is null)
+                    {
+                        created = PdfDocument.CreateBlank(wPt, hPt);
+                        pageIdx = 0;
+                    }
+                    else
+                    {
+                        pageIdx = created.AppendBlankPage(wPt, hPt);
+                    }
+                    created.AddImageBgra(pageIdx, pixels, w, h, new PvRect { Left = 0, Bottom = 0, Right = wPt, Top = hPt });
+                }
+
+                created?.SaveAs(saveDlg.FileName, incremental: false);
+            }
+            finally
+            {
+                created?.Dispose();
+            }
+
+            OpenFile(saveDlg.FileName);
+            StatusMessage.Text = $"PDF creado desde {openDlg.FileNames.Length} imagen(es)";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error al crear PDF desde imágenes:\n{ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void DocumentTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)

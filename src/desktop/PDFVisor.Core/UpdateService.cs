@@ -1,5 +1,6 @@
 using System.Net.Http.Headers;
 using System.Reflection;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace PDFVisor.Core;
@@ -11,6 +12,7 @@ public sealed record UpdateInfo(
     string ReleaseUrl,
     string? InstallerDownloadUrl,
     string? InstallerFileName,
+    string? ChecksumDownloadUrl,
     string ReleaseNotes)
 {
     public bool IsUpdateAvailable => LatestVersion > CurrentVersion;
@@ -25,7 +27,7 @@ public static class UpdateService
     {
         var v = Assembly.GetEntryAssembly()?.GetName().Version
                 ?? typeof(UpdateService).Assembly.GetName().Version
-                ?? new Version(0, 9, 0);
+                ?? new Version(1, 1, 0);
         return new Version(v.Major, v.Minor, Math.Max(0, v.Build));
     }
 
@@ -61,17 +63,24 @@ public static class UpdateService
 
         string? installerUrl = null;
         string? installerName = null;
+        string? checksumUrl = null;
+
         if (root.TryGetProperty("assets", out var assets) && assets.ValueKind == JsonValueKind.Array)
         {
             foreach (var asset in assets.EnumerateArray())
             {
                 string name = asset.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
                 string dl = asset.TryGetProperty("browser_download_url", out var d) ? d.GetString() ?? "" : "";
-                if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && !string.IsNullOrWhiteSpace(dl))
+                if (string.IsNullOrWhiteSpace(dl)) continue;
+
+                if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) && installerUrl is null)
                 {
                     installerName = name;
                     installerUrl = dl;
-                    break;
+                }
+                else if (name.Equals("checksums.sha256", StringComparison.OrdinalIgnoreCase))
+                {
+                    checksumUrl = dl;
                 }
             }
         }
@@ -83,6 +92,7 @@ public static class UpdateService
             releaseUrl,
             installerUrl,
             installerName,
+            checksumUrl,
             notes);
     }
 
@@ -96,6 +106,33 @@ public static class UpdateService
         if (!Version.TryParse(clean, out var parsed)) return false;
         version = new Version(parsed.Major, parsed.Minor, Math.Max(0, parsed.Build));
         return true;
+    }
+
+    public static bool VerifySha256Checksum(string filePath, string fileName, string checksumsManifestContent)
+    {
+        if (!File.Exists(filePath) || string.IsNullOrWhiteSpace(checksumsManifestContent))
+            return false;
+
+        string? expectedHash = null;
+        foreach (string rawLine in checksumsManifestContent.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = rawLine.Trim().Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length >= 2)
+            {
+                string candidateName = Path.GetFileName(parts[1].TrimStart('*'));
+                if (string.Equals(candidateName, fileName, StringComparison.OrdinalIgnoreCase))
+                {
+                    expectedHash = parts[0].Trim();
+                    break;
+                }
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(expectedHash)) return false;
+
+        using var fs = File.OpenRead(filePath);
+        string actualHash = Convert.ToHexString(SHA256.HashData(fs));
+        return string.Equals(actualHash, expectedHash, StringComparison.OrdinalIgnoreCase);
     }
 
     public static async Task<string> DownloadInstallerAsync(
@@ -118,19 +155,31 @@ public static class UpdateService
         resp.EnsureSuccessStatusCode();
 
         long? totalBytes = resp.Content.Headers.ContentLength;
-        await using var input = await resp.Content.ReadAsStreamAsync(ct);
-        await using var output = File.Create(destPath);
-
-        byte[] buffer = new byte[81920];
-        long downloaded = 0;
-        int read;
-        while ((read = await input.ReadAsync(buffer, ct)) > 0)
+        await using (var input = await resp.Content.ReadAsStreamAsync(ct))
+        await using (var output = File.Create(destPath))
         {
-            await output.WriteAsync(buffer.AsMemory(0, read), ct);
-            downloaded += read;
-            if (totalBytes is > 0)
+            byte[] buffer = new byte[81920];
+            long downloaded = 0;
+            int read;
+            while ((read = await input.ReadAsync(buffer, ct)) > 0)
             {
-                progress?.Report((double)downloaded / totalBytes.Value);
+                await output.WriteAsync(buffer.AsMemory(0, read), ct);
+                downloaded += read;
+                if (totalBytes is > 0)
+                {
+                    progress?.Report((double)downloaded / totalBytes.Value);
+                }
+            }
+        }
+
+        // Verify SHA-256 integrity if the release includes checksums.sha256
+        if (!string.IsNullOrWhiteSpace(update.ChecksumDownloadUrl))
+        {
+            string manifest = await http.GetStringAsync(update.ChecksumDownloadUrl, ct);
+            if (!VerifySha256Checksum(destPath, fileName, manifest))
+            {
+                try { File.Delete(destPath); } catch { }
+                throw new InvalidDataException("La verificación SHA-256 del instalador descargado falló. Descarga cancelada por seguridad.");
             }
         }
 

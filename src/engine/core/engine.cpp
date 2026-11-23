@@ -259,6 +259,64 @@ PV_API pv_status_t pv_doc_open(const char* utf8_path, const char* utf8_password,
     return PV_OK;
 }
 
+PV_API pv_status_t pv_doc_create_blank(double width_pt, double height_pt, pv_document_handle* out_doc) {
+    if (!out_doc || width_pt <= 0.0 || height_pt <= 0.0) {
+        set_last_error("Invalid arguments to pv_doc_create_blank");
+        return PV_ERR_INVALID_ARG;
+    }
+    *out_doc = nullptr;
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    if (g_init_refcount.load() <= 0) {
+        set_last_error("Engine not initialized");
+        return PV_ERR_NOT_INITIALIZED;
+    }
+
+    FPDF_DOCUMENT raw_doc = FPDF_CreateNewDocument();
+    if (!raw_doc) {
+        set_last_error("FPDF_CreateNewDocument failed");
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+
+    FPDF_PAGE page = FPDFPage_New(raw_doc, 0, width_pt, height_pt);
+    if (!page) {
+        FPDF_CloseDocument(raw_doc);
+        set_last_error("FPDFPage_New failed");
+        return PV_ERR_EDIT_FAILED;
+    }
+    FPDFPage_GenerateContent(page);
+    FPDF_ClosePage(page);
+
+    auto* doc = new (std::nothrow) pv_document_t();
+    if (!doc) {
+        FPDF_CloseDocument(raw_doc);
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+    doc->raw = raw_doc;
+    *out_doc = doc;
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_doc_append_blank_page(pv_document_handle doc, double width_pt, double height_pt, int32_t* out_page_index) {
+    if (!doc || !doc->raw || width_pt <= 0.0 || height_pt <= 0.0) {
+        set_last_error("Invalid arguments to pv_doc_append_blank_page");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    int idx = FPDF_GetPageCount(doc->raw);
+    FPDF_PAGE page = FPDFPage_New(doc->raw, idx, width_pt, height_pt);
+    if (!page) {
+        set_last_error("FPDFPage_New failed");
+        return PV_ERR_EDIT_FAILED;
+    }
+    FPDFPage_GenerateContent(page);
+    FPDF_ClosePage(page);
+
+    if (out_page_index) *out_page_index = idx;
+    return PV_OK;
+}
+
 PV_API void pv_doc_close(pv_document_handle doc) {
     if (!doc) return;
     std::lock_guard<std::mutex> lock(g_pdfium_mutex);

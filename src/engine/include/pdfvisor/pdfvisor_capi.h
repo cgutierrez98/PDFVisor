@@ -108,6 +108,8 @@ PV_API const char* pv_get_last_error(void);
 
 /* Document lifecycle */
 PV_API pv_status_t pv_doc_open(const char* utf8_path, const char* utf8_password, pv_document_handle* out_doc);
+PV_API pv_status_t pv_doc_create_blank(double width_pt, double height_pt, pv_document_handle* out_doc);
+PV_API pv_status_t pv_doc_append_blank_page(pv_document_handle doc, double width_pt, double height_pt, int32_t* out_page_index);
 PV_API void        pv_doc_close(pv_document_handle doc);
 PV_API int32_t     pv_doc_get_page_count(pv_document_handle doc);
 PV_API pv_status_t pv_doc_get_page_size(pv_document_handle doc, int32_t page_index, pv_page_size_t* out_size);
