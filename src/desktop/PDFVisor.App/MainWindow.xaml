@@ -68,7 +68,49 @@
                 <Separator/>
                 <MenuItem x:Name="MenuSanitize" Header="_Sanear metadatos e historial..." Click="BtnSanitize_Click"/>
             </MenuItem>
+
+            <MenuItem Header="A_yuda">
+                <MenuItem Header="Buscar _actualizaciones..." Click="MenuCheckUpdates_Click"/>
+                <Separator/>
+                <MenuItem Header="_Acerca de PDFVisor" Click="MenuAbout_Click"/>
+            </MenuItem>
         </Menu>
+
+        <!-- Update Available InfoBar (non-intrusive banner, shown only when a newer GitHub Release exists) -->
+        <Border x:Name="UpdateBanner"
+                DockPanel.Dock="Top"
+                Visibility="Collapsed"
+                Background="#22D92638"
+                BorderBrush="#55D92638"
+                BorderThickness="0,0,0,1"
+                Padding="14,7">
+            <DockPanel LastChildFill="False">
+                <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock FontFamily="{StaticResource FluentIconsFont}" Text="&#xE896;" FontSize="15" Foreground="#F04455" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                    <TextBlock x:Name="TxtUpdateBanner" Text="Nueva versión disponible" FontSize="12.5" FontWeight="Medium" VerticalAlignment="Center"/>
+                </StackPanel>
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Button x:Name="BtnDownloadUpdate"
+                            Content="Actualizar ahora"
+                            Style="{StaticResource PrimaryAccentButton}"
+                            Padding="12,4"
+                            FontSize="12"
+                            Margin="0,0,6,0"
+                            Click="BtnDownloadUpdate_Click"/>
+                    <Button Content="Ver notas"
+                            Style="{StaticResource SecondaryButton}"
+                            Padding="10,4"
+                            FontSize="12"
+                            Margin="0,0,6,0"
+                            Click="BtnOpenReleaseNotes_Click"/>
+                    <Button Style="{StaticResource IconToolbarButton}"
+                            Content="&#xE711;"
+                            Width="24" Height="24" FontSize="10"
+                            Click="BtnDismissUpdate_Click"
+                            ToolTip="Ocultar aviso"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
 
         <!-- 2. Clean Single-Row Fluent Icon Toolbar (shown when a document is open) -->
         <Border x:Name="ToolbarBorder" DockPanel.Dock="Top" BorderBrush="#22888888" BorderThickness="0,1,0,1" Padding="10,4" Visibility="Collapsed">

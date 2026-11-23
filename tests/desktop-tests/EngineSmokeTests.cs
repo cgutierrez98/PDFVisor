@@ -492,6 +492,43 @@ public sealed class EngineSmokeTests : IDisposable
         Assert.Equal(1, session.CurrentPageObjects.Count(o => o.Type == PdfPageObjectType.Image));
     }
 
+    [Fact]
+    public void UpdateService_ParsesReleaseJson_And_DetectsNewerVersion()
+    {
+        const string sampleReleaseJson = """
+        {
+          "tag_name": "v0.10.0",
+          "html_url": "https://github.com/cgutierrez98/PDFVisor/releases/tag/v0.10.0",
+          "body": "Mejoras de rendimiento y correcciones.",
+          "assets": [
+            {
+              "name": "PDFVisor-0.10.0-win-x64-portable.zip",
+              "browser_download_url": "https://example.com/portable.zip"
+            },
+            {
+              "name": "PDFVisor-Setup-0.10.0-win-x64.exe",
+              "browser_download_url": "https://example.com/PDFVisor-Setup-0.10.0-win-x64.exe"
+            }
+          ]
+        }
+        """;
+
+        var newer = UpdateService.ParseGitHubReleaseJson(sampleReleaseJson, new Version(0, 9, 0));
+        Assert.NotNull(newer);
+        Assert.True(newer.IsUpdateAvailable);
+        Assert.Equal(new Version(0, 10, 0), newer.LatestVersion);
+        Assert.Equal("PDFVisor-Setup-0.10.0-win-x64.exe", newer.InstallerFileName);
+        Assert.Equal("https://example.com/PDFVisor-Setup-0.10.0-win-x64.exe", newer.InstallerDownloadUrl);
+
+        var same = UpdateService.ParseGitHubReleaseJson(sampleReleaseJson, new Version(0, 10, 0));
+        Assert.NotNull(same);
+        Assert.False(same.IsUpdateAvailable);
+
+        var older = UpdateService.ParseGitHubReleaseJson(sampleReleaseJson, new Version(1, 0, 0));
+        Assert.NotNull(older);
+        Assert.False(older.IsUpdateAvailable);
+    }
+
     private static byte[] BuildMinimalValidPdf(string text)
     {
         var sb = new StringBuilder();

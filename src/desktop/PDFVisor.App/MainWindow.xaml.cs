@@ -17,6 +17,7 @@ public partial class MainWindow : Window
     private readonly WorkspaceViewModel _workspace = new();
     private DocumentSession? _boundSession;
     private CancellationTokenSource? _thumbCts;
+    private UpdateInfo? _pendingUpdate;
     private bool _isUpdatingControls;
     private bool _isSidebarOpen = true;
 
@@ -36,6 +37,7 @@ public partial class MainWindow : Window
                 if (file.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
                     OpenFile(file);
             }
+            _ = CheckUpdatesInBackgroundAsync(silent: true);
         };
         UpdateUiState();
     }
@@ -462,6 +464,111 @@ public partial class MainWindow : Window
     }
 
     private void MenuExit_Click(object sender, RoutedEventArgs e) => Close();
+
+    // --- Auto-Update Channel (GitHub Releases) ---
+    private async void MenuCheckUpdates_Click(object sender, RoutedEventArgs e)
+    {
+        StatusMessage.Text = "Buscando actualizaciones...";
+        await CheckUpdatesInBackgroundAsync(silent: false);
+    }
+
+    private async Task CheckUpdatesInBackgroundAsync(bool silent)
+    {
+        try
+        {
+            if (silent) await Task.Delay(1800);
+            var info = await UpdateService.CheckForUpdatesAsync();
+            if (info is not null && info.IsUpdateAvailable)
+            {
+                _pendingUpdate = info;
+                TxtUpdateBanner.Text = $"Nueva versión {info.TagName} disponible (actual: v{info.CurrentVersion})";
+                BtnDownloadUpdate.Visibility = string.IsNullOrWhiteSpace(info.InstallerDownloadUrl)
+                    ? Visibility.Collapsed
+                    : Visibility.Visible;
+                UpdateBanner.Visibility = Visibility.Visible;
+                if (!silent) StatusMessage.Text = $"Actualización disponible: {info.TagName}";
+            }
+            else if (!silent)
+            {
+                StatusMessage.Text = "PDFVisor está actualizado";
+                MessageBox.Show(
+                    this,
+                    $"Ya tienes instalada la última versión de PDFVisor (v{UpdateService.GetCurrentVersion()}).",
+                    "Sin actualizaciones",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Information);
+            }
+        }
+        catch (Exception ex)
+        {
+            if (!silent)
+            {
+                StatusMessage.Text = "No se pudo comprobar actualizaciones";
+                MessageBox.Show(
+                    this,
+                    $"No se pudo conectar con GitHub Releases:\n{ex.Message}",
+                    "Error al buscar actualizaciones",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning);
+            }
+        }
+    }
+
+    private async void BtnDownloadUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        if (_pendingUpdate is null) return;
+        BtnDownloadUpdate.IsEnabled = false;
+        try
+        {
+            var progress = new Progress<double>(p =>
+            {
+                int pct = (int)Math.Round(p * 100);
+                TxtUpdateBanner.Text = $"Descargando {_pendingUpdate.TagName}... {pct}%";
+                StatusMessage.Text = $"Descargando actualización ({pct}%)...";
+            });
+
+            string installerPath = await UpdateService.DownloadInstallerAsync(_pendingUpdate, progress);
+            TxtUpdateBanner.Text = "Descarga completada. Iniciando instalador...";
+
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(installerPath)
+            {
+                Arguments = "/CLOSEAPPLICATIONS /RESTARTAPPLICATIONS",
+                UseShellExecute = true
+            });
+            Close();
+        }
+        catch (Exception ex)
+        {
+            BtnDownloadUpdate.IsEnabled = true;
+            TxtUpdateBanner.Text = $"Nueva versión {_pendingUpdate.TagName} disponible";
+            MessageBox.Show(this, $"No se pudo descargar el instalador:\n{ex.Message}", "Error de actualización",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void BtnOpenReleaseNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (_pendingUpdate is null || string.IsNullOrWhiteSpace(_pendingUpdate.ReleaseUrl)) return;
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(_pendingUpdate.ReleaseUrl)
+        {
+            UseShellExecute = true
+        });
+    }
+
+    private void BtnDismissUpdate_Click(object sender, RoutedEventArgs e)
+    {
+        UpdateBanner.Visibility = Visibility.Collapsed;
+    }
+
+    private void MenuAbout_Click(object sender, RoutedEventArgs e)
+    {
+        MessageBox.Show(
+            this,
+            $"PDFVisor v{UpdateService.GetCurrentVersion()}\nVisor y editor de PDF nativo para Windows (x64).\n\nLicencia MIT — GitHub: cgutierrez98/PDFVisor",
+            "Acerca de PDFVisor",
+            MessageBoxButton.OK,
+            MessageBoxImage.Information);
+    }
 
     private void DocumentTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
