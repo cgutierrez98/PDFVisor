@@ -1,5 +1,10 @@
 # PDFVisor
 
+[![CI — Build & Test](https://github.com/cgutierrez98/PDFVisor/actions/workflows/ci.yml/badge.svg)](https://github.com/cgutierrez98/PDFVisor/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/cgutierrez98/PDFVisor?label=release)](https://github.com/cgutierrez98/PDFVisor/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform: Windows x64](https://img.shields.io/badge/Platform-Windows%20x64-0078D6.svg)](https://github.com/cgutierrez98/PDFVisor/releases)
+
 **Visor y editor de PDF profesional nativo para Windows (x64)** construido con **C# (.NET 10 / WPF Fluent)** y un **motor nativo en C++20 (`PDFVisor.Engine.dll`)**, utilizando exclusivamente librerías open-source con licencias permisivas (**PDFium**, **QPDF**, **Windows CNG / PKCS#7**, **Windows OCR / ONNX**).
 
 ---
