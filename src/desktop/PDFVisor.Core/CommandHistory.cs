@@ -390,3 +390,128 @@ public sealed class AddImageObjectCommand : IDocumentCommand
     public void Undo() { if (_objIndex >= 0) _doc.RemovePageObject(_pageIndex, _objIndex); }
     public void Dispose() { }
 }
+
+public sealed class AddUnicodeTextObjectCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly int _pageIndex;
+    private readonly string _text;
+    private readonly string _ttfPath;
+    private readonly float _fontSize;
+    private readonly double _xPt;
+    private readonly double _yPt;
+    private readonly uint _rgba;
+    private int _objIndex = -1;
+
+    public string Description => $"Añadir texto Unicode en página {_pageIndex + 1}";
+
+    public AddUnicodeTextObjectCommand(PdfDocument doc, int pageIndex, string text, string ttfPath, float fontSize, double xPt, double yPt, uint rgba = 0x111111FF)
+    {
+        _doc = doc;
+        _pageIndex = pageIndex;
+        _text = text;
+        _ttfPath = ttfPath;
+        _fontSize = fontSize;
+        _xPt = xPt;
+        _yPt = yPt;
+        _rgba = rgba;
+    }
+
+    public void Execute() => _objIndex = _doc.AddUnicodeTextObject(_pageIndex, _text, _ttfPath, _fontSize, _xPt, _yPt, _rgba);
+    public void Undo() { if (_objIndex >= 0) _doc.RemovePageObject(_pageIndex, _objIndex); }
+    public void Dispose() { }
+}
+
+public sealed class BatchGeneratedObjectsCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly Func<PdfDocument, List<(int PageIndex, int FirstObjIndex, int Count)>> _generator;
+    private List<(int PageIndex, int FirstObjIndex, int Count)> _inserted = [];
+
+    public string Description { get; }
+
+    public BatchGeneratedObjectsCommand(
+        PdfDocument doc,
+        string description,
+        Func<PdfDocument, List<(int PageIndex, int FirstObjIndex, int Count)>> generator)
+    {
+        _doc = doc;
+        Description = description;
+        _generator = generator;
+    }
+
+    public void Execute()
+    {
+        _inserted = _generator(_doc);
+    }
+
+    public void Undo()
+    {
+        for (int g = _inserted.Count - 1; g >= 0; g--)
+        {
+            var (pageIndex, firstObjIndex, count) = _inserted[g];
+            if (firstObjIndex < 0 || count <= 0) continue;
+            for (int k = count - 1; k >= 0; k--)
+            {
+                _doc.RemovePageObject(pageIndex, firstObjIndex + k);
+            }
+        }
+    }
+
+    public void Dispose() { }
+}
+
+public sealed class SnapshotPdfMutationCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly Action<string, string> _qpdfTransform;
+    private string? _beforeSnapshot;
+    private string? _afterSnapshot;
+
+    public string Description { get; }
+
+    public SnapshotPdfMutationCommand(PdfDocument doc, string description, Action<string, string> qpdfTransform)
+    {
+        _doc = doc;
+        Description = description;
+        _qpdfTransform = qpdfTransform;
+    }
+
+    public void Execute()
+    {
+        if (_beforeSnapshot is null)
+        {
+            _beforeSnapshot = Path.Combine(Path.GetTempPath(), $"pdfvisor_snap_before_{Guid.NewGuid():N}.pdf");
+            _doc.SaveAs(_beforeSnapshot, incremental: false);
+        }
+
+        if (_afterSnapshot is null || !File.Exists(_afterSnapshot))
+        {
+            _afterSnapshot = Path.Combine(Path.GetTempPath(), $"pdfvisor_snap_after_{Guid.NewGuid():N}.pdf");
+            _qpdfTransform(_beforeSnapshot, _afterSnapshot);
+        }
+
+        _doc.LoadWorkingCopy(_afterSnapshot, workingPassword: null);
+    }
+
+    public void Undo()
+    {
+        if (_beforeSnapshot is null || !File.Exists(_beforeSnapshot))
+            throw new InvalidOperationException("Snapshot not available for Undo.");
+        _doc.LoadWorkingCopy(_beforeSnapshot, workingPassword: null);
+    }
+
+    public void Dispose()
+    {
+        if (_beforeSnapshot is not null && File.Exists(_beforeSnapshot))
+        {
+            try { File.Delete(_beforeSnapshot); } catch { }
+            _beforeSnapshot = null;
+        }
+        if (_afterSnapshot is not null && File.Exists(_afterSnapshot))
+        {
+            try { File.Delete(_afterSnapshot); } catch { }
+            _afterSnapshot = null;
+        }
+    }
+}

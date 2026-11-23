@@ -1,29 +1,55 @@
 <Window x:Class="PDFVisor.App.Dialogs.CertificatePickerDialog"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Firmar documento digitalmente"
-        Width="520"
-        Height="400"
-        MinWidth="460"
-        MinHeight="340"
+        Title="Firmar documento digitalmente (PAdES)"
+        Width="560"
+        Height="490"
+        MinWidth="480"
+        MinHeight="430"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False">
     <DockPanel Margin="20">
-        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
-            <TextBlock Text="Selecciona un certificado digital" FontSize="15" FontWeight="SemiBold"/>
-            <TextBlock Text="Certificados con clave privada disponibles en el almacén de Windows"
-                       Opacity="0.7" FontSize="12" Margin="0,2,0,0"/>
-        </StackPanel>
+        <DockPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+            <Button DockPanel.Dock="Right"
+                    Content="Cargar .PFX / .P12..."
+                    Style="{StaticResource SecondaryButton}"
+                    Padding="12,5"
+                    VerticalAlignment="Center"
+                    Click="BtnLoadPfx_Click"/>
+            <StackPanel>
+                <TextBlock Text="Selecciona un certificado digital" FontSize="15" FontWeight="SemiBold"/>
+                <TextBlock Text="Almacén personal de Windows (CNG / DNIe / Token) o archivo PKCS#12 (.pfx)"
+                           Opacity="0.7" FontSize="12" Margin="0,2,0,0"/>
+            </StackPanel>
+        </DockPanel>
 
         <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
-            <TextBlock Text="Motivo de la firma:" FontSize="12" Margin="0,0,0,4"/>
-            <TextBox x:Name="TxtReason" Text="Aprobado y firmado digitalmente" Padding="8,5" Margin="0,0,0,8"/>
+            <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="2*"/>
+                    <ColumnDefinition Width="10"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Grid.Column="0">
+                    <TextBlock Text="Motivo de la firma:" FontSize="12" Margin="0,0,0,4"/>
+                    <TextBox x:Name="TxtReason" Text="Aprobado y firmado digitalmente" Padding="8,5"/>
+                </StackPanel>
+                <StackPanel Grid.Column="2">
+                    <TextBlock Text="Ubicación (opcional):" FontSize="12" Margin="0,0,0,4"/>
+                    <TextBox x:Name="TxtLocation" Padding="8,5"/>
+                </StackPanel>
+            </Grid>
 
             <TextBlock Text="Servidor de sellado de tiempo (TSA RFC 3161, opcional):" FontSize="12" Margin="0,0,0,4"/>
-            <TextBox x:Name="TxtTsaUrl" Padding="8,5" Margin="0,0,0,14"/>
+            <TextBox x:Name="TxtTsaUrl" Padding="8,5" Margin="0,0,0,10"/>
+
+            <CheckBox x:Name="ChkDrawOnPage"
+                      Content="Dibujar recuadro de firma en la página con el ratón"
+                      Margin="0,0,0,14"/>
 
             <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                <Button Content="Firmar documento"
+                <Button x:Name="BtnSign"
+                        Content="Firmar documento"
                         IsDefault="True"
                         Click="BtnSign_Click"
                         Style="{StaticResource PrimaryAccentButton}"
@@ -34,7 +60,7 @@
             </StackPanel>
         </StackPanel>
 
-        <ListBox x:Name="CertList" Padding="4">
+        <ListBox x:Name="CertList" Padding="4" SelectionChanged="CertList_SelectionChanged">
             <ListBox.ItemTemplate>
                 <DataTemplate>
                     <StackPanel Margin="6,4">

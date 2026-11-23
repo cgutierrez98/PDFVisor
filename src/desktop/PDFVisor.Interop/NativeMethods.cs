@@ -58,9 +58,17 @@ internal struct PvFormFieldNative
     public nint FieldTypeUtf8;
     public nint ValueUtf8;
     public int IsChecked;
+    public int PageIndex;
+    public PvRect Rect;
 }
 
-public sealed record PdfFormField(string Name, string FieldType, string Value, bool IsChecked);
+public sealed record PdfFormField(
+    string Name,
+    string FieldType,
+    string Value,
+    bool IsChecked,
+    int PageIndex = -1,
+    PvRect Rect = default);
 
 [StructLayout(LayoutKind.Sequential)]
 internal struct PvSignatureInfoNative
@@ -139,6 +147,27 @@ public sealed record PdfMetadata(
     string PdfVersion,
     bool IsEncrypted,
     bool IsLinearized);
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct PvOcrWordNative
+{
+    public nint Utf8Text;
+    public double XPt;
+    public double YPt;
+    public float FontSize;
+}
+
+public readonly record struct PdfOcrWord(string Text, double XPt, double YPt, float FontSize);
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct PvLinkInfoNative
+{
+    public int Found;
+    public int DestPageIndex;
+    public nint UriUtf8;
+}
+
+public sealed record PdfLinkTarget(bool Found, int? DestPageIndex, string? Uri);
 
 [StructLayout(LayoutKind.Sequential)]
 public struct PvRenderOptions
@@ -320,6 +349,21 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? defaultValueUtf8);
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_qpdf_set_form_field_rect(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string fieldNameUtf8,
+        ref PvRect newRect);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_qpdf_remove_form_field(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string fieldNameUtf8);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern PvStatus pv_qpdf_prepare_pades_signature(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
@@ -417,6 +461,24 @@ internal static class NativeMethods
         out int outObjIndex);
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe PvStatus pv_page_add_invisible_text_batch(
+        nint doc,
+        int pageIndex,
+        PvOcrWordNative* words,
+        int wordCount,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? ttfFontPathUtf8,
+        out int outFirstObjIndex,
+        out int outAddedCount);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_get_link_at_point(
+        nint doc,
+        int pageIndex,
+        double xPt,
+        double yPt,
+        out PvLinkInfoNative outLink);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern PvStatus pv_qpdf_sanitize_metadata(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
@@ -472,6 +534,19 @@ internal static class NativeMethods
         double yPt,
         double angleDegrees,
         uint rgba);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_add_rotated_unicode_text(
+        nint doc,
+        int pageIndex,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Text,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? ttfFontPathUtf8,
+        float fontSize,
+        double xPt,
+        double yPt,
+        double angleDegrees,
+        uint rgba,
+        out int outObjIndex);
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern PvStatus pv_qpdf_get_metadata(

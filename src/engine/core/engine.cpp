@@ -9,6 +9,7 @@
 #include <fpdf_save.h>
 #include <fpdf_annot.h>
 #include <fpdf_signature.h>
+#include <fpdf_formfill.h>
 
 #include <algorithm>
 #include <atomic>
@@ -17,6 +18,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -27,6 +30,12 @@
 
 struct pv_document_t {
     FPDF_DOCUMENT raw = nullptr;
+    std::unique_ptr<std::ifstream> stream;
+    FPDF_FILEACCESS file_access{};
+    FPDF_FORMFILLINFO form_info{};
+    FPDF_FORMHANDLE form_handle = nullptr;
+    int active_page_index = -1;
+    FPDF_PAGE active_page = nullptr;
 };
 
 namespace {
@@ -90,6 +99,99 @@ std::filesystem::path utf8_to_path(const char* utf8) {
 #else
     return std::filesystem::path(utf8 ? utf8 : "");
 #endif
+}
+
+std::string format_fpdf_error(unsigned long err);
+
+void ffi_noop_invalidate(FPDF_FORMFILLINFO*, FPDF_PAGE, double, double, double, double) {}
+void ffi_noop_cursor(FPDF_FORMFILLINFO*, int) {}
+int ffi_noop_set_timer(FPDF_FORMFILLINFO*, int, TimerCallback) { return 0; }
+void ffi_noop_kill_timer(FPDF_FORMFILLINFO*, int) {}
+FPDF_SYSTEMTIME ffi_get_local_time(FPDF_FORMFILLINFO*) { return FPDF_SYSTEMTIME{}; }
+int ffi_get_rotation(FPDF_FORMFILLINFO*, FPDF_PAGE) { return 0; }
+void ffi_noop_named_action(FPDF_FORMFILLINFO*, FPDF_BYTESTRING) {}
+
+FPDF_PAGE ffi_get_page(FPDF_FORMFILLINFO* info, FPDF_DOCUMENT, int page_index) {
+    // Compute enclosing pv_document_t from member pointer offset
+    auto* base = reinterpret_cast<uint8_t*>(info) - offsetof(pv_document_t, form_info);
+    auto* pv_doc = reinterpret_cast<pv_document_t*>(base);
+    if (pv_doc && pv_doc->active_page && pv_doc->active_page_index == page_index) {
+        return pv_doc->active_page;
+    }
+    return nullptr;
+}
+
+void init_doc_form_fill(pv_document_t* doc) {
+    if (!doc || !doc->raw) return;
+    doc->form_info = FPDF_FORMFILLINFO{};
+    doc->form_info.version = 1;
+    doc->form_info.FFI_Invalidate = &ffi_noop_invalidate;
+    doc->form_info.FFI_SetCursor = &ffi_noop_cursor;
+    doc->form_info.FFI_SetTimer = &ffi_noop_set_timer;
+    doc->form_info.FFI_KillTimer = &ffi_noop_kill_timer;
+    doc->form_info.FFI_GetLocalTime = &ffi_get_local_time;
+    doc->form_info.FFI_GetPage = &ffi_get_page;
+    doc->form_info.FFI_GetRotation = &ffi_get_rotation;
+    doc->form_info.FFI_ExecuteNamedAction = &ffi_noop_named_action;
+
+    doc->form_handle = FPDFDOC_InitFormFillEnvironment(doc->raw, &doc->form_info);
+    if (doc->form_handle) {
+        FPDF_RemoveFormFieldHighlight(doc->form_handle);
+    }
+}
+
+int read_file_block_callback(void* param, unsigned long position, unsigned char* buf, unsigned long size) {
+    auto* ifs = static_cast<std::ifstream*>(param);
+    if (!ifs || !buf || size == 0) return 0;
+    ifs->clear();
+    ifs->seekg(static_cast<std::streamoff>(position), std::ios::beg);
+    if (!ifs->good()) return 0;
+    ifs->read(reinterpret_cast<char*>(buf), static_cast<std::streamsize>(size));
+    return ifs->gcount() == static_cast<std::streamsize>(size) ? 1 : 0;
+}
+
+pv_status_t open_fpdf_from_utf8_path(
+    const char* utf8_path,
+    const char* utf8_password,
+    std::unique_ptr<std::ifstream>& out_stream,
+    FPDF_FILEACCESS& out_access,
+    FPDF_DOCUMENT& out_raw_doc) {
+    out_raw_doc = nullptr;
+    auto fs_path = utf8_to_path(utf8_path);
+    auto ifs = std::make_unique<std::ifstream>(fs_path, std::ios::in | std::ios::binary | std::ios::ate);
+    if (!ifs->is_open()) {
+        set_last_error("File not found or could not be opened");
+        return PV_ERR_OPEN_FAILED;
+    }
+
+    auto end_pos = ifs->tellg();
+    if (end_pos < 0 || static_cast<uint64_t>(end_pos) > static_cast<uint64_t>(std::numeric_limits<unsigned long>::max())) {
+        // Fallback to FPDF_LoadDocument for >4GB files
+        ifs.reset();
+        out_raw_doc = FPDF_LoadDocument(utf8_path, utf8_password);
+        if (!out_raw_doc) {
+            unsigned long err = FPDF_GetLastError();
+            set_last_error(format_fpdf_error(err));
+            return (err == FPDF_ERR_PASSWORD) ? PV_ERR_PASSWORD_REQUIRED : PV_ERR_OPEN_FAILED;
+        }
+        return PV_OK;
+    }
+
+    ifs->seekg(0, std::ios::beg);
+    out_access = FPDF_FILEACCESS{};
+    out_access.m_FileLen = static_cast<unsigned long>(end_pos);
+    out_access.m_GetBlock = &read_file_block_callback;
+    out_access.m_Param = ifs.get();
+
+    out_raw_doc = FPDF_LoadCustomDocument(&out_access, utf8_password);
+    if (!out_raw_doc) {
+        unsigned long err = FPDF_GetLastError();
+        set_last_error(format_fpdf_error(err));
+        return (err == FPDF_ERR_PASSWORD) ? PV_ERR_PASSWORD_REQUIRED : PV_ERR_OPEN_FAILED;
+    }
+
+    out_stream = std::move(ifs);
+    return PV_OK;
 }
 
 struct FileWriteContext {
@@ -221,7 +323,7 @@ PV_API void pv_engine_shutdown(void) {
 }
 
 PV_API const char* pv_engine_version(void) {
-    return "0.8.0-pro";
+    return "1.3.0";
 }
 
 PV_API const char* pv_get_last_error(void) {
@@ -241,20 +343,19 @@ PV_API pv_status_t pv_doc_open(const char* utf8_path, const char* utf8_password,
         return PV_ERR_NOT_INITIALIZED;
     }
 
-    FPDF_DOCUMENT raw_doc = FPDF_LoadDocument(utf8_path, utf8_password);
-    if (!raw_doc) {
-        unsigned long err = FPDF_GetLastError();
-        set_last_error(format_fpdf_error(err));
-        return (err == FPDF_ERR_PASSWORD) ? PV_ERR_PASSWORD_REQUIRED : PV_ERR_OPEN_FAILED;
-    }
-
     auto* doc = new (std::nothrow) pv_document_t();
     if (!doc) {
-        FPDF_CloseDocument(raw_doc);
         set_last_error("Out of memory allocating document handle");
         return PV_ERR_OUT_OF_MEMORY;
     }
-    doc->raw = raw_doc;
+
+    pv_status_t st = open_fpdf_from_utf8_path(utf8_path, utf8_password, doc->stream, doc->file_access, doc->raw);
+    if (st != PV_OK) {
+        delete doc;
+        return st;
+    }
+
+    init_doc_form_fill(doc);
     *out_doc = doc;
     set_last_error("");
     return PV_OK;
@@ -294,6 +395,7 @@ PV_API pv_status_t pv_doc_create_blank(double width_pt, double height_pt, pv_doc
         return PV_ERR_OUT_OF_MEMORY;
     }
     doc->raw = raw_doc;
+    init_doc_form_fill(doc);
     *out_doc = doc;
     return PV_OK;
 }
@@ -321,10 +423,15 @@ PV_API pv_status_t pv_doc_append_blank_page(pv_document_handle doc, double width
 PV_API void pv_doc_close(pv_document_handle doc) {
     if (!doc) return;
     std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    if (doc->form_handle) {
+        FPDFDOC_ExitFormFillEnvironment(doc->form_handle);
+        doc->form_handle = nullptr;
+    }
     if (doc->raw) {
         FPDF_CloseDocument(doc->raw);
         doc->raw = nullptr;
     }
+    doc->stream.reset();
     delete doc;
 }
 
@@ -451,11 +558,12 @@ PV_API pv_status_t pv_doc_import_pages(
     if (out_imported_count) *out_imported_count = 0;
 
     std::lock_guard<std::mutex> lock(g_pdfium_mutex);
-    FPDF_DOCUMENT src_doc = FPDF_LoadDocument(src_utf8_path, src_utf8_password);
-    if (!src_doc) {
-        unsigned long err = FPDF_GetLastError();
-        set_last_error(format_fpdf_error(err));
-        return (err == FPDF_ERR_PASSWORD) ? PV_ERR_PASSWORD_REQUIRED : PV_ERR_OPEN_FAILED;
+    std::unique_ptr<std::ifstream> src_stream;
+    FPDF_FILEACCESS src_access{};
+    FPDF_DOCUMENT src_doc = nullptr;
+    pv_status_t open_st = open_fpdf_from_utf8_path(src_utf8_path, src_utf8_password, src_stream, src_access, src_doc);
+    if (open_st != PV_OK) {
+        return open_st;
     }
 
     int src_count = FPDF_GetPageCount(src_doc);
@@ -792,6 +900,25 @@ PV_API pv_status_t pv_page_render_bgra(
         options->rotation,
         flags);
 
+    if (options->render_annotations && doc->form_handle) {
+        doc->active_page_index = page_index;
+        doc->active_page = page;
+        FORM_OnAfterLoadPage(page, doc->form_handle);
+        FPDF_FFLDraw(
+            doc->form_handle,
+            bitmap,
+            page,
+            0,
+            0,
+            options->width_px,
+            options->height_px,
+            options->rotation,
+            flags);
+        FORM_OnBeforeClosePage(page, doc->form_handle);
+        doc->active_page = nullptr;
+        doc->active_page_index = -1;
+    }
+
     FPDFBitmap_Destroy(bitmap);
     FPDF_ClosePage(page);
     return PV_OK;
@@ -855,6 +982,25 @@ PV_API pv_status_t pv_page_render_tile_bgra(
         full_page_height_px,
         rotation,
         flags);
+
+    if (render_annotations && doc->form_handle) {
+        doc->active_page_index = page_index;
+        doc->active_page = page;
+        FORM_OnAfterLoadPage(page, doc->form_handle);
+        FPDF_FFLDraw(
+            doc->form_handle,
+            bitmap,
+            page,
+            -tile_x,
+            -tile_y,
+            full_page_width_px,
+            full_page_height_px,
+            rotation,
+            flags);
+        FORM_OnBeforeClosePage(page, doc->form_handle);
+        doc->active_page = nullptr;
+        doc->active_page_index = -1;
+    }
 
     FPDFBitmap_Destroy(bitmap);
     FPDF_ClosePage(page);
@@ -1460,6 +1606,90 @@ PV_API void pv_free_page_objects(pv_page_object_info_t* objects, int32_t count) 
     std::free(objects);
 }
 
+namespace {
+
+int redact_form_object_recursive(
+    FPDF_PAGE page,
+    FPDF_PAGEOBJECT form_obj,
+    float r_left,
+    float r_bottom,
+    float r_right,
+    float r_top,
+    int depth = 0) {
+    if (!form_obj || depth > 16) return 0;
+    int sub_count = FPDFFormObj_CountObjects(form_obj);
+    if (sub_count <= 0) return 0;
+
+    std::vector<FPDF_PAGEOBJECT> sub_remove;
+    int affected = 0;
+    for (int i = 0; i < sub_count; ++i) {
+        FPDF_PAGEOBJECT sub = FPDFFormObj_GetObject(form_obj, static_cast<unsigned long>(i));
+        if (!sub) continue;
+        float ol = 0, ob = 0, or_ = 0, ot = 0;
+        if (!FPDFPageObj_GetBounds(sub, &ol, &ob, &or_, &ot)) continue;
+        bool intersects = !(or_ < r_left || ol > r_right || ot < r_bottom || ob > r_top);
+        if (!intersects) continue;
+
+        int sub_type = FPDFPageObj_GetType(sub);
+        if (sub_type == FPDF_PAGEOBJ_FORM) {
+            bool fully_covered = (ol >= r_left && or_ <= r_right && ob >= r_bottom && ot <= r_top);
+            if (fully_covered) {
+                sub_remove.push_back(sub);
+            } else {
+                affected += redact_form_object_recursive(page, sub, r_left, r_bottom, r_right, r_top, depth + 1);
+            }
+        } else if (sub_type == FPDF_PAGEOBJ_IMAGE) {
+            bool fully_covered = (ol >= r_left && or_ <= r_right && ob >= r_bottom && ot <= r_top);
+            if (fully_covered) {
+                sub_remove.push_back(sub);
+            } else {
+                FPDF_BITMAP img_bmp = FPDFImageObj_GetBitmap(sub);
+                if (img_bmp) {
+                    int bw = FPDFBitmap_GetWidth(img_bmp);
+                    int bh = FPDFBitmap_GetHeight(img_bmp);
+                    int stride = FPDFBitmap_GetStride(img_bmp);
+                    int fmt = FPDFBitmap_GetFormat(img_bmp);
+                    uint8_t* buf = static_cast<uint8_t*>(FPDFBitmap_GetBuffer(img_bmp));
+                    float iw = std::max(0.001f, or_ - ol);
+                    float ih = std::max(0.001f, ot - ob);
+                    if (buf && bw > 0 && bh > 0 && (fmt == FPDFBitmap_BGRA || fmt == FPDFBitmap_BGRx || fmt == FPDFBitmap_BGR)) {
+                        int bpp = (fmt == FPDFBitmap_BGR) ? 3 : 4;
+                        int x0 = std::clamp(static_cast<int>(std::floor((std::max(r_left, ol) - ol) / iw * bw)), 0, bw);
+                        int x1 = std::clamp(static_cast<int>(std::ceil((std::min(r_right, or_) - ol) / iw * bw)), 0, bw);
+                        int y0 = std::clamp(static_cast<int>(std::floor((ot - std::min(r_top, ot)) / ih * bh)), 0, bh);
+                        int y1 = std::clamp(static_cast<int>(std::ceil((ot - std::max(r_bottom, ob)) / ih * bh)), 0, bh);
+                        for (int y = y0; y < y1; ++y) {
+                            uint8_t* row = buf + static_cast<size_t>(y) * stride;
+                            for (int x = x0; x < x1; ++x) {
+                                row[x * bpp + 0] = 0;
+                                row[x * bpp + 1] = 0;
+                                row[x * bpp + 2] = 0;
+                                if (bpp == 4) row[x * bpp + 3] = 255;
+                            }
+                        }
+                        FPDFImageObj_SetBitmap(&page, 1, sub, img_bmp);
+                        ++affected;
+                    }
+                    FPDFBitmap_Destroy(img_bmp);
+                }
+            }
+        } else {
+            // Text, vector paths (outlined fonts/logos), shadings
+            sub_remove.push_back(sub);
+        }
+    }
+
+    for (FPDF_PAGEOBJECT sub : sub_remove) {
+        if (FPDFFormObj_RemoveObject(form_obj, sub)) {
+            FPDFPageObj_Destroy(sub);
+            ++affected;
+        }
+    }
+    return affected;
+}
+
+} // namespace
+
 PV_API pv_status_t pv_page_apply_redaction(
     pv_document_handle doc,
     int32_t page_index,
@@ -1484,10 +1714,10 @@ PV_API pv_status_t pv_page_apply_redaction(
         return PV_ERR_INVALID_PAGE;
     }
 
-    // 1. Physically remove intersecting text objects, and surgically mask or remove intersecting images
+    // 1. Physically remove intersecting text/path/shading objects, recurse into Form XObjects, and mask/remove images
     std::vector<FPDF_PAGEOBJECT> to_remove;
     int count = FPDFPage_CountObjects(page);
-    int masked_images = 0;
+    int affected_extra = 0;
     for (int i = 0; i < count; ++i) {
         FPDF_PAGEOBJECT obj = FPDFPage_GetObject(page, i);
         if (!obj) continue;
@@ -1498,8 +1728,13 @@ PV_API pv_status_t pv_page_apply_redaction(
         if (!intersects) continue;
 
         int type = FPDFPageObj_GetType(obj);
-        if (type == FPDF_PAGEOBJ_TEXT) {
-            to_remove.push_back(obj);
+        if (type == FPDF_PAGEOBJ_FORM) {
+            bool fully_covered = (ol >= r_left && or_ <= r_right && ob >= r_bottom && ot <= r_top);
+            if (fully_covered) {
+                to_remove.push_back(obj);
+            } else {
+                affected_extra += redact_form_object_recursive(page, obj, r_left, r_bottom, r_right, r_top, 0);
+            }
         } else if (type == FPDF_PAGEOBJ_IMAGE) {
             bool fully_covered = (ol >= r_left && or_ <= r_right && ob >= r_bottom && ot <= r_top);
             if (fully_covered) {
@@ -1532,18 +1767,40 @@ PV_API pv_status_t pv_page_apply_redaction(
                             }
                         }
                         FPDFImageObj_SetBitmap(&page, 1, obj, img_bmp);
-                        ++masked_images;
+                        ++affected_extra;
                     }
                     FPDFBitmap_Destroy(img_bmp);
                 }
             }
+        } else {
+            // Text, vector paths (including outlined glyphs/curves), shadings
+            to_remove.push_back(obj);
         }
     }
 
-    int removed = masked_images;
+    int removed = affected_extra;
     for (FPDF_PAGEOBJECT obj : to_remove) {
         if (FPDFPage_RemoveObject(page, obj)) {
             FPDFPageObj_Destroy(obj);
+            ++removed;
+        }
+    }
+
+    // 1b. Also remove intersecting annotations (notes, highlights, links, form widgets, etc.)
+    int annot_count = FPDFPage_GetAnnotCount(page);
+    for (int a = annot_count - 1; a >= 0; --a) {
+        FPDF_ANNOTATION annot = FPDFPage_GetAnnot(page, a);
+        if (!annot) continue;
+        FS_RECTF ar{};
+        bool has_rect = FPDFAnnot_GetRect(annot, &ar) != 0;
+        FPDFPage_CloseAnnot(annot);
+        if (!has_rect) continue;
+        float al = std::min(ar.left, ar.right);
+        float aright = std::max(ar.left, ar.right);
+        float ab = std::min(ar.bottom, ar.top);
+        float at = std::max(ar.bottom, ar.top);
+        bool intersects = !(aright < r_left || al > r_right || at < r_bottom || ab > r_top);
+        if (intersects && FPDFPage_RemoveAnnot(page, a)) {
             ++removed;
         }
     }
@@ -1618,6 +1875,161 @@ PV_API pv_status_t pv_page_add_invisible_text(
         return PV_ERR_EDIT_FAILED;
     }
     if (out_obj_index) *out_obj_index = idx;
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_add_invisible_text_batch(
+    pv_document_handle doc,
+    int32_t page_index,
+    const pv_ocr_word_t* words,
+    int32_t word_count,
+    const char* ttf_font_path_utf8,
+    int32_t* out_first_obj_index,
+    int32_t* out_added_count) {
+    if (out_first_obj_index) *out_first_obj_index = -1;
+    if (out_added_count) *out_added_count = 0;
+    if (!doc || !doc->raw || page_index < 0 || (!words && word_count > 0) || word_count < 0) {
+        set_last_error("Invalid arguments to pv_page_add_invisible_text_batch");
+        return PV_ERR_INVALID_ARG;
+    }
+    if (word_count == 0) return PV_OK;
+
+    std::vector<uint8_t> font_data;
+    if (ttf_font_path_utf8 && *ttf_font_path_utf8 != '\0') {
+        std::ifstream ff(utf8_to_path(ttf_font_path_utf8), std::ios::binary);
+        if (ff.is_open()) {
+            font_data.assign((std::istreambuf_iterator<char>(ff)), std::istreambuf_iterator<char>());
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    FPDF_FONT unicode_font = nullptr;
+    if (!font_data.empty()) {
+        unicode_font = FPDFText_LoadFont(
+            doc->raw,
+            font_data.data(),
+            static_cast<uint32_t>(font_data.size()),
+            FPDF_FONT_TRUETYPE,
+            1);
+    }
+
+    int first_idx = -1;
+    int added = 0;
+    for (int32_t i = 0; i < word_count; ++i) {
+        const auto& w = words[i];
+        if (!w.utf8_text || *w.utf8_text == '\0' || w.font_size <= 0.0f) continue;
+
+        bool has_non_ascii = false;
+        for (const unsigned char* p = reinterpret_cast<const unsigned char*>(w.utf8_text); *p; ++p) {
+            if (*p > 127) { has_non_ascii = true; break; }
+        }
+
+        FPDF_PAGEOBJECT text_obj = (has_non_ascii && unicode_font)
+            ? FPDFPageObj_CreateTextObj(doc->raw, unicode_font, w.font_size)
+            : FPDFPageObj_NewTextObj(doc->raw, "Helvetica", w.font_size);
+        if (!text_obj) continue;
+
+        auto utf16 = utf8_to_utf16(w.utf8_text);
+        if (!FPDFText_SetText(text_obj, utf16.data())) {
+            FPDFPageObj_Destroy(text_obj);
+            continue;
+        }
+
+        FPDFTextObj_SetTextRenderMode(text_obj, FPDF_TEXTRENDERMODE_INVISIBLE);
+        FPDFPageObj_Transform(text_obj, 1.0, 0.0, 0.0, 1.0, w.x_pt, w.y_pt);
+        FPDFPage_InsertObject(page, text_obj);
+        int cur_idx = FPDFPage_CountObjects(page) - 1;
+        if (first_idx < 0) first_idx = cur_idx;
+        ++added;
+    }
+
+    if (unicode_font) {
+        FPDFFont_Close(unicode_font);
+    }
+
+    FPDF_BOOL ok = (added == 0) ? 1 : FPDFPage_GenerateContent(page);
+    FPDF_ClosePage(page);
+
+    if (!ok) {
+        set_last_error("Failed to regenerate content after batch OCR insertion");
+        return PV_ERR_EDIT_FAILED;
+    }
+    if (out_first_obj_index) *out_first_obj_index = first_idx;
+    if (out_added_count) *out_added_count = added;
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_get_link_at_point(
+    pv_document_handle doc,
+    int32_t page_index,
+    double x_pt,
+    double y_pt,
+    pv_link_info_t* out_link) {
+    if (!doc || !doc->raw || page_index < 0 || !out_link) {
+        set_last_error("Invalid arguments to pv_page_get_link_at_point");
+        return PV_ERR_INVALID_ARG;
+    }
+    out_link->found = 0;
+    out_link->dest_page_index = -1;
+    out_link->uri_utf8 = nullptr;
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    FPDF_LINK link = FPDFLink_GetLinkAtPoint(page, x_pt, y_pt);
+    if (!link) {
+        FPDF_ClosePage(page);
+        return PV_OK;
+    }
+
+    FPDF_DEST dest = FPDFLink_GetDest(doc->raw, link);
+    if (dest) {
+        int dst_page = FPDFDest_GetDestPageIndex(doc->raw, dest);
+        if (dst_page >= 0) {
+            out_link->found = 1;
+            out_link->dest_page_index = dst_page;
+            FPDF_ClosePage(page);
+            return PV_OK;
+        }
+    }
+
+    FPDF_ACTION action = FPDFLink_GetAction(link);
+    if (action) {
+        unsigned long act_type = FPDFAction_GetType(action);
+        if (act_type == PDFACTION_GOTO) {
+            FPDF_DEST act_dest = FPDFAction_GetDest(doc->raw, action);
+            if (act_dest) {
+                int dst_page = FPDFDest_GetDestPageIndex(doc->raw, act_dest);
+                if (dst_page >= 0) {
+                    out_link->found = 1;
+                    out_link->dest_page_index = dst_page;
+                }
+            }
+        } else if (act_type == PDFACTION_URI) {
+            unsigned long uri_len = FPDFAction_GetURIPath(doc->raw, action, nullptr, 0);
+            if (uri_len > 1) {
+                auto* uri_buf = static_cast<char*>(std::malloc(uri_len));
+                if (uri_buf) {
+                    FPDFAction_GetURIPath(doc->raw, action, uri_buf, uri_len);
+                    uri_buf[uri_len - 1] = '\0';
+                    out_link->found = 1;
+                    out_link->uri_utf8 = uri_buf;
+                }
+            }
+        }
+    }
+
+    FPDF_ClosePage(page);
     return PV_OK;
 }
 
@@ -1878,6 +2290,92 @@ PV_API pv_status_t pv_page_add_rotated_text(
         set_last_error("Failed to regenerate content after adding rotated text");
         return PV_ERR_EDIT_FAILED;
     }
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_add_rotated_unicode_text(
+    pv_document_handle doc,
+    int32_t page_index,
+    const char* utf8_text,
+    const char* ttf_font_path_utf8,
+    float font_size,
+    double x_pt,
+    double y_pt,
+    double angle_degrees,
+    uint32_t rgba,
+    int32_t* out_obj_index) {
+    if (out_obj_index) *out_obj_index = -1;
+    if (!doc || !doc->raw || page_index < 0 || !utf8_text || *utf8_text == '\0' || font_size <= 0.0f) {
+        set_last_error("Invalid arguments to pv_page_add_rotated_unicode_text");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::vector<uint8_t> font_data;
+    if (ttf_font_path_utf8 && *ttf_font_path_utf8 != '\0') {
+        std::ifstream ff(utf8_to_path(ttf_font_path_utf8), std::ios::binary);
+        if (ff.is_open()) {
+            font_data.assign((std::istreambuf_iterator<char>(ff)), std::istreambuf_iterator<char>());
+        }
+    }
+
+    auto utf16 = utf8_to_utf16(utf8_text);
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    FPDF_FONT font = nullptr;
+    if (!font_data.empty()) {
+        font = FPDFText_LoadFont(
+            doc->raw,
+            font_data.data(),
+            static_cast<uint32_t>(font_data.size()),
+            FPDF_FONT_TRUETYPE,
+            1);
+    }
+
+    FPDF_PAGEOBJECT text_obj = font
+        ? FPDFPageObj_CreateTextObj(doc->raw, font, font_size)
+        : FPDFPageObj_NewTextObj(doc->raw, "Helvetica-Bold", font_size);
+    if (font) {
+        FPDFFont_Close(font);
+    }
+
+    if (!text_obj) {
+        FPDF_ClosePage(page);
+        set_last_error("Failed to create rotated text object");
+        return PV_ERR_EDIT_FAILED;
+    }
+
+    if (!FPDFText_SetText(text_obj, utf16.data())) {
+        FPDFPageObj_Destroy(text_obj);
+        FPDF_ClosePage(page);
+        set_last_error("FPDFText_SetText failed for rotated Unicode text");
+        return PV_ERR_EDIT_FAILED;
+    }
+
+    unsigned int r, g, b, a;
+    unpack_rgba(rgba, r, g, b, a);
+    FPDFPageObj_SetFillColor(text_obj, r, g, b, a);
+
+    double rad = angle_degrees * 3.14159265358979323846 / 180.0;
+    double c = std::cos(rad);
+    double s = std::sin(rad);
+    FPDFPageObj_Transform(text_obj, c, s, -s, c, x_pt, y_pt);
+
+    FPDFPage_InsertObject(page, text_obj);
+    int idx = FPDFPage_CountObjects(page) - 1;
+    FPDF_BOOL ok = FPDFPage_GenerateContent(page);
+    FPDF_ClosePage(page);
+
+    if (!ok) {
+        set_last_error("Failed to regenerate content after adding rotated Unicode text");
+        return PV_ERR_EDIT_FAILED;
+    }
+    if (out_obj_index) *out_obj_index = idx;
     return PV_OK;
 }
 

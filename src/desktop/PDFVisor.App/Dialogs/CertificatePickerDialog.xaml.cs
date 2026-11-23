@@ -1,5 +1,9 @@
+using System.Collections.ObjectModel;
 using System.Security.Cryptography.X509Certificates;
 using System.Windows;
+using System.Windows.Controls;
+using Microsoft.Win32;
+using PDFVisor.Core;
 
 namespace PDFVisor.App.Dialogs;
 
@@ -7,22 +11,70 @@ public partial class CertificatePickerDialog : Window
 {
     private sealed record CertDisplayItem(X509Certificate2 Certificate, string DisplayName, string Details);
 
+    private readonly ObservableCollection<CertDisplayItem> _items = [];
+
     public X509Certificate2? SelectedCertificate { get; private set; }
     public string Reason => TxtReason.Text.Trim();
+    public string? Location => string.IsNullOrWhiteSpace(TxtLocation.Text) ? null : TxtLocation.Text.Trim();
     public string? TsaUrl => string.IsNullOrWhiteSpace(TxtTsaUrl.Text) ? null : TxtTsaUrl.Text.Trim();
+    public bool DrawPositionOnPage => ChkDrawOnPage.IsChecked == true;
 
     public CertificatePickerDialog(IReadOnlyList<X509Certificate2> certificates)
     {
         InitializeComponent();
-        var items = certificates.Select(c =>
+        foreach (var c in certificates)
         {
-            string name = c.GetNameInfo(X509NameType.SimpleName, false);
-            if (string.IsNullOrWhiteSpace(name)) name = c.Subject;
-            return new CertDisplayItem(c, name, $"Emisor: {c.Issuer}  •  Válido hasta {c.NotAfter:dd/MM/yyyy}");
-        }).ToList();
+            _items.Add(CreateItem(c));
+        }
 
-        CertList.ItemsSource = items;
-        if (items.Count > 0) CertList.SelectedIndex = 0;
+        CertList.ItemsSource = _items;
+        if (_items.Count > 0) CertList.SelectedIndex = 0;
+        BtnSign.IsEnabled = _items.Count > 0;
+    }
+
+    private static CertDisplayItem CreateItem(X509Certificate2 c, string? sourceTag = null)
+    {
+        string name = c.GetNameInfo(X509NameType.SimpleName, false);
+        if (string.IsNullOrWhiteSpace(name)) name = c.Subject;
+        string prefix = sourceTag is not null ? $"[{sourceTag}] " : string.Empty;
+        return new CertDisplayItem(c, prefix + name, $"Emisor: {c.Issuer}  •  Válido hasta {c.NotAfter:dd/MM/yyyy}");
+    }
+
+    private void CertList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        BtnSign.IsEnabled = CertList.SelectedItem is CertDisplayItem;
+    }
+
+    private void BtnLoadPfx_Click(object sender, RoutedEventArgs e)
+    {
+        var openDlg = new OpenFileDialog
+        {
+            Title = "Seleccionar certificado digital PKCS#12",
+            Filter = "Certificados PKCS#12 (*.pfx;*.p12)|*.pfx;*.p12|Todos los archivos (*.*)|*.*"
+        };
+        if (openDlg.ShowDialog(this) != true) return;
+
+        var pwdDlg = new InputDialog(
+            "Contraseña del certificado",
+            $"Introduce la contraseña de \"{System.IO.Path.GetFileName(openDlg.FileName)}\":",
+            isPassword: true)
+        {
+            Owner = this
+        };
+        if (pwdDlg.ShowDialog() != true) return;
+
+        try
+        {
+            var cert = PadesSignatureService.LoadCertificateFromPfx(openDlg.FileName, pwdDlg.ResultText);
+            var item = CreateItem(cert, "PFX");
+            _items.Insert(0, item);
+            CertList.SelectedIndex = 0;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"No se pudo cargar el certificado PFX/P12:\n{ex.Message}", "Error de certificado",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private void BtnSign_Click(object sender, RoutedEventArgs e)

@@ -63,6 +63,8 @@ typedef struct pv_form_field_t {
     char* field_type_utf8; /* "/Tx", "/Btn", "/Ch", "/Sig" */
     char* value_utf8;
     int32_t is_checked;
+    int32_t page_index;    /* 0-based page index, or -1 if unknown */
+    pv_rect_t rect;        /* Widget bounding rect in PDF points */
 } pv_form_field_t;
 
 typedef struct pv_signature_info_t {
@@ -100,6 +102,19 @@ typedef struct pv_metadata_t {
     int32_t is_encrypted;
     int32_t is_linearized;
 } pv_metadata_t;
+
+typedef struct pv_ocr_word_t {
+    const char* utf8_text;
+    double x_pt;
+    double y_pt;
+    float font_size;
+} pv_ocr_word_t;
+
+typedef struct pv_link_info_t {
+    int32_t found;           /* 1 if a link exists at point, 0 otherwise */
+    int32_t dest_page_index; /* >= 0 for internal page jump, -1 otherwise */
+    char* uri_utf8;          /* non-null for external URI links; free with pv_free_string */
+} pv_link_info_t;
 
 typedef struct pv_render_options_t {
     int32_t width_px;
@@ -223,6 +238,19 @@ PV_API pv_status_t pv_qpdf_add_text_field(
     const pv_rect_t* rect,
     const char* default_value_utf8);
 
+PV_API pv_status_t pv_qpdf_set_form_field_rect(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    const char* field_name_utf8,
+    const pv_rect_t* new_rect);
+
+PV_API pv_status_t pv_qpdf_remove_form_field(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    const char* field_name_utf8);
+
 PV_API pv_status_t pv_qpdf_prepare_pades_signature(
     const char* src_utf8_path,
     const char* src_utf8_password,
@@ -306,6 +334,22 @@ PV_API pv_status_t pv_page_add_invisible_text(
     double y_pt,
     int32_t* out_obj_index);
 
+PV_API pv_status_t pv_page_add_invisible_text_batch(
+    pv_document_handle doc,
+    int32_t page_index,
+    const pv_ocr_word_t* words,
+    int32_t word_count,
+    const char* ttf_font_path_utf8,
+    int32_t* out_first_obj_index,
+    int32_t* out_added_count);
+
+PV_API pv_status_t pv_page_get_link_at_point(
+    pv_document_handle doc,
+    int32_t page_index,
+    double x_pt,
+    double y_pt,
+    pv_link_info_t* out_link);
+
 PV_API pv_status_t pv_qpdf_sanitize_metadata(
     const char* src_utf8_path,
     const char* src_utf8_password,
@@ -356,6 +400,18 @@ PV_API pv_status_t pv_page_add_rotated_text(
     double y_pt,
     double angle_degrees,
     uint32_t rgba);
+
+PV_API pv_status_t pv_page_add_rotated_unicode_text(
+    pv_document_handle doc,
+    int32_t page_index,
+    const char* utf8_text,
+    const char* ttf_font_path_utf8,
+    float font_size,
+    double x_pt,
+    double y_pt,
+    double angle_degrees,
+    uint32_t rgba,
+    int32_t* out_obj_index);
 
 PV_API pv_status_t pv_qpdf_get_metadata(
     const char* utf8_path,

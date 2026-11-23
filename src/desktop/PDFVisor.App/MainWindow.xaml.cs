@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Microsoft.Win32;
 using PDFVisor.App.Dialogs;
+using PDFVisor.App.Services;
 using PDFVisor.Core;
 using PDFVisor.Interop;
 
@@ -27,6 +28,7 @@ public partial class MainWindow : Window
     private Point _thumbDragStart;
     private int _thumbDragIndex = -1;
     private int _busyDepth;
+    private (System.Security.Cryptography.X509Certificates.X509Certificate2 Cert, string? Reason, string? Location, string? TsaUrl)? _pendingSignatureRequest;
 
     private void SetBusy(bool busy, string title = "Procesando...", string detail = "", double? progressPercent = null)
     {
@@ -102,6 +104,10 @@ public partial class MainWindow : Window
         _workspace.PropertyChanged += Workspace_PropertyChanged;
         PdfViewport.PromptNoteText = () => PromptInput("Añadir nota adhesiva", "Escribe el texto de la nota:");
         PdfViewport.PromptAddText = () => PromptInput("Insertar texto", "Escribe el texto que deseas añadir a la página:");
+        PdfViewport.PromptFormFieldName = () => PromptInput("Nuevo campo de formulario", "Nombre del campo de texto:");
+        PdfViewport.FormFieldDoubleClicked = EditFormFieldInteractive;
+        PdfViewport.ExternalUriRequested = OnExternalUriRequested;
+        PdfViewport.SignatureRegionSelected = OnSignatureRegionSelected;
 
         RefreshRecentFilesUi();
         Loaded += (_, _) =>
@@ -301,9 +307,24 @@ public partial class MainWindow : Window
         _thumbCts = new CancellationTokenSource();
         var ct = _thumbCts.Token;
 
+        try
+        {
+            // Yield briefly so visible high-DPI viewport tiles acquire RenderGate first
+            await Task.Delay(120, ct);
+        }
+        catch (OperationCanceledException) { return; }
+
         const int maxThumbWidth = 148;
         var pagesSnapshot = session.Pages.ToArray();
-        foreach (var page in pagesSnapshot)
+        if (pagesSnapshot.Length == 0) return;
+
+        // Prioritize thumbnails radiating outward from CurrentPageIndex
+        int anchor = Math.Clamp(session.CurrentPageIndex, 0, pagesSnapshot.Length - 1);
+        var ordered = pagesSnapshot
+            .OrderBy(p => Math.Abs(p.PageIndex - anchor))
+            .ToArray();
+
+        foreach (var page in ordered)
         {
             if (ct.IsCancellationRequested) break;
             if (page.ThumbnailImage is not null) continue;
@@ -314,8 +335,18 @@ public partial class MainWindow : Window
 
             try
             {
-                byte[] bgra = await Task.Run(() =>
-                    session.Document.RenderPageBgra(page.PageIndex, w, h, rotation: 0, lcdText: false), ct);
+                await session.RenderGate.WaitAsync(ct);
+                byte[] bgra;
+                try
+                {
+                    if (ct.IsCancellationRequested) break;
+                    bgra = await Task.Run(() =>
+                        session.Document.RenderPageBgra(page.PageIndex, w, h, rotation: 0, lcdText: false), ct);
+                }
+                finally
+                {
+                    try { session.RenderGate.Release(); } catch (ObjectDisposedException) { }
+                }
 
                 if (ct.IsCancellationRequested) break;
 
@@ -822,24 +853,9 @@ public partial class MainWindow : Window
 
         try
         {
-            var pageInfo = session.Pages[pageIdx];
             string outPath = dlg.FileName;
-            await RunBusyAsync("Exportando página como imagen...", $"Renderizando página {pageNum} a 200 DPI...", () => Task.Run(() =>
-            {
-                const double exportDpi = 200.0;
-                int wPx = Math.Clamp((int)Math.Round(pageInfo.WidthPt * (exportDpi / 72.0)), 1, 8192);
-                int hPx = Math.Clamp((int)Math.Round(pageInfo.HeightPt * (exportDpi / 72.0)), 1, 8192);
-                byte[] bgra = session.Document.RenderPageBgra(pageIdx, wPx, hPx);
-
-                var bmp = BitmapSource.Create(wPx, hPx, exportDpi, exportDpi, PixelFormats.Bgra32, null, bgra, wPx * 4);
-                bmp.Freeze();
-                BitmapEncoder encoder = outPath.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
-                    ? new JpegBitmapEncoder { QualityLevel = 92 }
-                    : new PngBitmapEncoder();
-                encoder.Frames.Add(BitmapFrame.Create(bmp));
-                using var fs = System.IO.File.Create(outPath);
-                encoder.Save(fs);
-            }));
+            await RunBusyAsync("Exportando página como imagen...", $"Renderizando página {pageNum} a 200 DPI...", () =>
+                PdfWorkflowService.ExportPageAsImageAsync(session, pageIdx, outPath, exportDpi: 200.0));
             StatusMessage.Text = $"Página exportada: {System.IO.Path.GetFileName(outPath)}";
         }
         catch (Exception ex)
@@ -871,51 +887,11 @@ public partial class MainWindow : Window
         {
             string[] files = openDlg.FileNames;
             string destPath = saveDlg.FileName;
-            await RunBusyAsync("Creando PDF desde imágenes...", $"Procesando {files.Length} imagen(es)...", () => Task.Run(() =>
-            {
-                PdfDocument? created = null;
-                try
-                {
-                    for (int i = 0; i < files.Length; i++)
-                    {
-                        UpdateBusyProgress($"Imagen {i + 1} de {files.Length}: {System.IO.Path.GetFileName(files[i])}", (i * 100.0) / files.Length);
-                        var bmp = new BitmapImage();
-                        bmp.BeginInit();
-                        bmp.CacheOption = BitmapCacheOption.OnLoad;
-                        bmp.UriSource = new Uri(files[i]);
-                        bmp.EndInit();
-                        bmp.Freeze();
+            var progress = new Progress<(int Index, int Total, string FileName)>(p =>
+                UpdateBusyProgress($"Imagen {p.Index} de {p.Total}: {p.FileName}", (p.Index * 100.0) / Math.Max(1, p.Total)));
 
-                        var formatted = new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
-                        formatted.Freeze();
-                        int w = formatted.PixelWidth;
-                        int h = formatted.PixelHeight;
-                        byte[] pixels = new byte[w * h * 4];
-                        formatted.CopyPixels(pixels, w * 4, 0);
-
-                        double wPt = w * 72.0 / 96.0;
-                        double hPt = h * 72.0 / 96.0;
-                        int pageIdx;
-                        if (created is null)
-                        {
-                            created = PdfDocument.CreateBlank(wPt, hPt);
-                            pageIdx = 0;
-                        }
-                        else
-                        {
-                            pageIdx = created.AppendBlankPage(wPt, hPt);
-                        }
-                        created.AddImageBgra(pageIdx, pixels, w, h, new PvRect { Left = 0, Bottom = 0, Right = wPt, Top = hPt });
-                    }
-
-                    UpdateBusyProgress("Guardando PDF generado...", 98);
-                    created?.SaveAs(destPath, incremental: false);
-                }
-                finally
-                {
-                    created?.Dispose();
-                }
-            }));
+            await RunBusyAsync("Creando PDF desde imágenes...", $"Procesando {files.Length} imagen(es)...", () =>
+                PdfWorkflowService.CreatePdfFromImagesAsync(files, destPath, progress));
 
             OpenFile(destPath);
             StatusMessage.Text = $"PDF creado desde {files.Length} imagen(es)";
@@ -1346,17 +1322,9 @@ public partial class MainWindow : Window
     private void BtnAddTextField_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
-        string? name = PromptInput("Nuevo campo de formulario", "Nombre del campo de texto:");
-        if (string.IsNullOrWhiteSpace(name)) return;
-        try
-        {
-            _boundSession.AddTextFormField(name.Trim(), new PvRect { Left = 72, Bottom = 660, Right = 320, Top = 686 }, "");
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"Error al añadir campo:\n{ex.Message}", "Error de formulario",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-        }
+        _boundSession.ActiveTool = AnnotationTool.AddFormField;
+        SyncToolToggleButtons(AnnotationTool.AddFormField);
+        StatusMessage.Text = "Arrastra con el ratón sobre la página donde deseas crear el campo de texto (Esc para cancelar)";
     }
 
     // --- Security, Optimization & OCR ---
@@ -1444,51 +1412,87 @@ public partial class MainWindow : Window
         }
     }
 
+    private void OnExternalUriRequested(string rawUri)
+    {
+        if (!Uri.TryCreate(rawUri, UriKind.Absolute, out var uri) ||
+            (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeMailto))
+        {
+            return;
+        }
+
+        var confirm = MessageBox.Show(
+            this,
+            $"¿Deseas abrir el siguiente enlace externo?\n\n{uri}",
+            "Abrir enlace externo",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Question);
+        if (confirm == MessageBoxResult.Yes)
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri.AbsoluteUri) { UseShellExecute = true });
+        }
+    }
+
+    private async void OnSignatureRegionSelected(int pageIndex, PvRect pdfRect)
+    {
+        SyncToolToggleButtons(AnnotationTool.None);
+        if (_boundSession is null || _pendingSignatureRequest is not { } req) return;
+        _pendingSignatureRequest = null;
+        _boundSession.CurrentPageIndex = pageIndex;
+        await ExecuteSignPadesExportAsync(_boundSession, req.Cert, req.Reason, req.Location, req.TsaUrl, pdfRect);
+    }
+
     private async void BtnSignPades_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
         var session = _boundSession;
         var certs = PadesSignatureService.ListWindowsSigningCertificates();
-        if (certs.Count == 0)
-        {
-            MessageBox.Show(this,
-                "No se encontraron certificados con clave privada en el almacén personal de Windows.",
-                "Sin certificados disponibles",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            return;
-        }
 
         var picker = new CertificatePickerDialog(certs) { Owner = this };
         if (picker.ShowDialog() != true || picker.SelectedCertificate is null) return;
 
+        if (picker.DrawPositionOnPage)
+        {
+            _pendingSignatureRequest = (picker.SelectedCertificate, picker.Reason, picker.Location, picker.TsaUrl);
+            session.ActiveTool = AnnotationTool.SignStamp;
+            SyncToolToggleButtons(AnnotationTool.SignStamp);
+            StatusMessage.Text = "Arrastra con el ratón sobre la página donde deseas estampar tu firma digital (Esc para cancelar)";
+            return;
+        }
+
+        await ExecuteSignPadesExportAsync(session, picker.SelectedCertificate, picker.Reason, picker.Location, picker.TsaUrl, customRect: null);
+    }
+
+    private async Task ExecuteSignPadesExportAsync(
+        DocumentSession session,
+        System.Security.Cryptography.X509Certificates.X509Certificate2 cert,
+        string? reason,
+        string? location,
+        string? tsaUrl,
+        PvRect? customRect)
+    {
         var dlg = new SaveFileDialog
         {
             Title = "Guardar PDF firmado",
             Filter = "Documentos PDF (*.pdf)|*.pdf",
             FileName = $"{System.IO.Path.GetFileNameWithoutExtension(session.FileName)}_firmado.pdf"
         };
-        if (dlg.ShowDialog(this) == true)
+        if (dlg.ShowDialog(this) != true) return;
+
+        try
         {
-            try
-            {
-                string dest = dlg.FileName;
-                var cert = picker.SelectedCertificate;
-                string? reason = picker.Reason;
-                string? tsaUrl = picker.TsaUrl;
-                string detail = string.IsNullOrWhiteSpace(tsaUrl)
-                    ? "Aplicando firma digital PAdES..."
-                    : "Aplicando firma digital PAdES y sello de tiempo TSA...";
-                await RunBusyAsync("Firmando documento digitalmente...", detail, () =>
-                    Task.Run(() => session.SignPadesAndExport(dest, cert, reason: reason, tsaUrl: tsaUrl)));
-                StatusMessage.Text = $"Documento firmado: {System.IO.Path.GetFileName(dest)}";
-                OpenFile(dest);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Error al firmar:\n{ex.Message}", "Error de firma",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
-            }
+            string dest = dlg.FileName;
+            string detail = string.IsNullOrWhiteSpace(tsaUrl)
+                ? "Aplicando firma digital PAdES..."
+                : "Aplicando firma digital PAdES y sello de tiempo TSA...";
+            await RunBusyAsync("Firmando documento digitalmente...", detail, () =>
+                Task.Run(() => session.SignPadesAndExport(dest, cert, reason: reason, location: location, tsaUrl: tsaUrl, customWidgetRect: customRect)));
+            StatusMessage.Text = $"Documento firmado: {System.IO.Path.GetFileName(dest)}";
+            OpenFile(dest);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error al firmar:\n{ex.Message}", "Error de firma",
+                MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -1497,12 +1501,19 @@ public partial class MainWindow : Window
         if (_boundSession is null || _boundSession.PageCount == 0) return;
         var session = _boundSession;
         int pageIdx = session.CurrentPageIndex;
-        int words = -1;
-        await RunBusyAsync("Reconociendo texto (OCR)...", $"Analizando página {pageIdx + 1}...", async () =>
+        try
         {
-            words = await RunOcrOnPageAsync(session, pageIdx);
-        });
-        if (words >= 0) StatusMessage.Text = $"OCR completado ({words} palabras reconocidas)";
+            int words = 0;
+            await RunBusyAsync("Reconociendo texto (OCR)...", $"Analizando página {pageIdx + 1}...", async () =>
+            {
+                words = await OcrService.RecognizePageAsync(session, pageIdx);
+            });
+            StatusMessage.Text = $"OCR completado ({words} palabras reconocidas)";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error en OCR:\n{ex.Message}", "Error OCR", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
     }
 
     private async void BtnOcrAll_Click(object sender, RoutedEventArgs e)
@@ -1510,90 +1521,27 @@ public partial class MainWindow : Window
         if (_boundSession is null || _boundSession.PageCount == 0) return;
         var session = _boundSession;
         int totalPages = session.PageCount;
-        int totalWords = 0;
 
-        await RunBusyAsync("Reconociendo texto (OCR)...", $"Página 1 de {totalPages}...", async () =>
-        {
-            for (int p = 0; p < totalPages; p++)
-            {
-                UpdateBusyProgress($"Página {p + 1} de {totalPages}...", (p * 100.0) / Math.Max(1, totalPages));
-                StatusMessage.Text = $"Reconociendo texto (OCR): página {p + 1} de {totalPages}...";
-                session.CurrentPageIndex = p;
-                int words = await RunOcrOnPageAsync(session, p);
-                if (words < 0) return;
-                totalWords += words;
-            }
-            UpdateBusyProgress("Finalizando...", 100);
-        });
-        StatusMessage.Text = $"OCR completado: {totalWords} palabras en {totalPages} páginas";
-    }
-
-    private async Task<int> RunOcrOnPageAsync(DocumentSession session, int pageIndex)
-    {
-        var pageInfo = session.Pages[pageIndex];
-        string installedWorker = System.IO.Path.Combine(AppContext.BaseDirectory, "workers", "PDFVisor.OcrWorker.exe");
-        string devWorker = System.IO.Path.GetFullPath(System.IO.Path.Combine(
-            AppContext.BaseDirectory, "..", "..", "..", "..", "..", "workers", "PDFVisor.OcrWorker", "bin", "Release", "net10.0-windows10.0.19041.0", "PDFVisor.OcrWorker.exe"));
-        string workerExe = System.IO.File.Exists(installedWorker) ? installedWorker : devWorker;
-        if (!System.IO.File.Exists(workerExe))
-        {
-            MessageBox.Show(this, "No se encontró el módulo OCR instalado.", "OCR no disponible",
-                MessageBoxButton.OK, MessageBoxImage.Warning);
-            return -1;
-        }
-
-        string tempPng = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"pdfvisor_ocr_{Guid.NewGuid():N}.png");
         try
         {
-            int wPx = (int)Math.Round(pageInfo.WidthPt * (200.0 / 72.0));
-            int hPx = (int)Math.Round(pageInfo.HeightPt * (200.0 / 72.0));
-            byte[] bgra = await Task.Run(() => session.Document.RenderPageBgra(pageIndex, wPx, hPx));
-
-            var bmp = BitmapSource.Create(wPx, hPx, 200, 200, PixelFormats.Bgra32, null, bgra, wPx * 4);
-            var encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(bmp));
-            using (var fs = System.IO.File.Create(tempPng)) encoder.Save(fs);
-
-            var psi = new System.Diagnostics.ProcessStartInfo(workerExe, $"--backend auto \"{tempPng}\"")
+            int totalWords = 0;
+            var progress = new Progress<(int PageNumber, int TotalPages, int WordsSoFar)>(p =>
             {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-            using var proc = System.Diagnostics.Process.Start(psi)!;
-            string json = await proc.StandardOutput.ReadToEndAsync();
-            string err = await proc.StandardError.ReadToEndAsync();
-            await proc.WaitForExitAsync();
+                UpdateBusyProgress($"Página {p.PageNumber} de {p.TotalPages} ({p.WordsSoFar} palabras)...", (p.PageNumber - 1) * 100.0 / Math.Max(1, p.TotalPages));
+                StatusMessage.Text = $"Reconociendo texto (OCR): página {p.PageNumber} de {p.TotalPages}...";
+            });
 
-            if (proc.ExitCode != 0)
+            await RunBusyAsync("Reconociendo texto (OCR por lotes)...", $"Página 1 de {totalPages}...", async () =>
             {
-                MessageBox.Show(this, $"Error en OCR:\n{err}", "Error OCR", MessageBoxButton.OK, MessageBoxImage.Error);
-                return -1;
-            }
-
-            using var docJson = System.Text.Json.JsonDocument.Parse(json);
-            var words = docJson.RootElement.GetProperty("Words");
-            double scaleX = pageInfo.WidthPt / wPx;
-            double scaleY = pageInfo.HeightPt / hPx;
-            int injected = 0;
-            foreach (var w in words.EnumerateArray())
-            {
-                string txt = w.GetProperty("Text").GetString() ?? "";
-                if (string.IsNullOrWhiteSpace(txt)) continue;
-                double xPt = w.GetProperty("X").GetDouble() * scaleX;
-                double yTopPx = w.GetProperty("Y").GetDouble();
-                double hWordPx = w.GetProperty("Height").GetDouble();
-                double yPt = pageInfo.HeightPt - (yTopPx + hWordPx) * scaleY;
-                float fontSize = (float)Math.Clamp(hWordPx * scaleY, 6.0, 48.0);
-                session.AddInvisibleOcrText(txt, xPt, yPt, fontSize);
-                injected++;
-            }
-            return injected;
+                totalWords = await OcrService.RecognizeAllPagesAsync(session, progress);
+                session.NotifyExternalBatchMutated(session.CurrentPageIndex);
+                UpdateBusyProgress("Finalizando...", 100);
+            });
+            StatusMessage.Text = $"OCR completado: {totalWords} palabras en {totalPages} páginas";
         }
-        finally
+        catch (Exception ex)
         {
-            if (System.IO.File.Exists(tempPng)) try { System.IO.File.Delete(tempPng); } catch { }
+            MessageBox.Show(this, $"Error en OCR por lotes:\n{ex.Message}", "Error OCR", MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
 
@@ -1615,6 +1563,31 @@ public partial class MainWindow : Window
         }
     }
 
+    private async Task RunSearchFromUiAsync()
+    {
+        if (_boundSession is null) return;
+        bool matchCase = BtnSearchMatchCase.IsChecked == true;
+        bool wholeWord = BtnSearchWholeWord.IsChecked == true;
+
+        StatusProgressBar.Visibility = Visibility.Visible;
+        StatusMessage.Text = "Buscando en el documento...";
+        try
+        {
+            await _boundSession.SearchAsync(TxtSearch.Text, matchCase, wholeWord);
+        }
+        finally
+        {
+            StatusProgressBar.Visibility = Visibility.Collapsed;
+            StatusMessage.Text = string.IsNullOrWhiteSpace(_boundSession.SearchStatusText) ? "Listo" : $"Búsqueda: {_boundSession.SearchStatusText}";
+        }
+    }
+
+    private async void BtnSearchOption_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null || string.IsNullOrWhiteSpace(TxtSearch.Text)) return;
+        await RunSearchFromUiAsync();
+    }
+
     private async void TxtSearch_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Escape)
@@ -1625,7 +1598,10 @@ public partial class MainWindow : Window
         }
         if (e.Key == Key.Enter && _boundSession is not null)
         {
-            if (string.Equals(_boundSession.SearchQuery, TxtSearch.Text, StringComparison.Ordinal) &&
+            bool sameOptions = _boundSession.SearchMatchCase == (BtnSearchMatchCase.IsChecked == true) &&
+                               _boundSession.SearchWholeWord == (BtnSearchWholeWord.IsChecked == true);
+            if (sameOptions &&
+                string.Equals(_boundSession.SearchQuery, TxtSearch.Text, StringComparison.Ordinal) &&
                 _boundSession.TotalSearchMatches > 0)
             {
                 if (Keyboard.Modifiers == ModifierKeys.Shift) _boundSession.PreviousSearchMatch();
@@ -1633,17 +1609,7 @@ public partial class MainWindow : Window
             }
             else
             {
-                StatusProgressBar.Visibility = Visibility.Visible;
-                StatusMessage.Text = "Buscando en el documento...";
-                try
-                {
-                    await _boundSession.SearchAsync(TxtSearch.Text);
-                }
-                finally
-                {
-                    StatusProgressBar.Visibility = Visibility.Collapsed;
-                    StatusMessage.Text = string.IsNullOrWhiteSpace(_boundSession.SearchStatusText) ? "Listo" : $"Búsqueda: {_boundSession.SearchStatusText}";
-                }
+                await RunSearchFromUiAsync();
             }
             e.Handled = true;
         }
@@ -1674,13 +1640,75 @@ public partial class MainWindow : Window
 
     private void FormFieldList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (_boundSession is null || FormFieldList.SelectedItem is not PdfFormField field) return;
+        if (FormFieldList.SelectedItem is PdfFormField field)
+            EditFormFieldInteractive(field);
+    }
+
+    private void EditFormFieldInteractive(PdfFormField field)
+    {
+        if (_boundSession is null) return;
+
+        if (string.Equals(field.FieldType, "/Btn", StringComparison.Ordinal))
+        {
+            try
+            {
+                _boundSession.SetFormFieldValue(field.Name, field.IsChecked ? "Off" : "Yes");
+                StatusMessage.Text = $"Casilla \"{field.Name}\" actualizada";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Error al alternar casilla:\n{ex.Message}", "Error de formulario",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            return;
+        }
+
         string? newVal = PromptInput($"Editar campo \"{field.Name}\"", "Nuevo valor:", initialValue: field.Value);
         if (newVal is null) return;
         try { _boundSession.SetFormFieldValue(field.Name, newVal); }
         catch (Exception ex)
         {
             MessageBox.Show(this, $"Error al actualizar campo:\n{ex.Message}", "Error de formulario",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void FormFieldList_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Delete || _boundSession is null || FormFieldList.SelectedItem is not PdfFormField field)
+            return;
+
+        try
+        {
+            _boundSession.RemoveFormField(field.Name);
+            StatusMessage.Text = $"Campo \"{field.Name}\" eliminado (Ctrl+Z para deshacer)";
+            e.Handled = true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error al eliminar campo:\n{ex.Message}", "Error de formulario",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void PageObjectList_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Delete || _boundSession is null || PageObjectList.SelectedItem is not PdfPageObjectInfo obj)
+            return;
+
+        try
+        {
+            int pageIdx = _boundSession.CurrentPageIndex;
+            int objIdx = obj.Index;
+            _boundSession.Document.RemovePageObject(pageIdx, objIdx);
+            _boundSession.History.Clear();
+            _boundSession.NotifyExternalBatchMutated(pageIdx);
+            StatusMessage.Text = $"Objeto #{objIdx} eliminado de la página {pageIdx + 1}";
+            e.Handled = true;
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"No se pudo eliminar el objeto:\n{ex.Message}", "Error",
                 MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
@@ -1762,6 +1790,14 @@ public partial class MainWindow : Window
         else if (e.Key == Key.F11)
         {
             ToggleFullscreen();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape && _boundSession?.ActiveTool is AnnotationTool.SignStamp or AnnotationTool.AddFormField)
+        {
+            _pendingSignatureRequest = null;
+            _boundSession.ActiveTool = AnnotationTool.None;
+            SyncToolToggleButtons(AnnotationTool.None);
+            StatusMessage.Text = "Herramienta cancelada";
             e.Handled = true;
         }
         else if (e.Key == Key.Escape && _isFullscreen)

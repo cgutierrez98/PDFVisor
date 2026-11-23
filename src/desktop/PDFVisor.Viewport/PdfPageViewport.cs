@@ -69,6 +69,12 @@ public sealed class PdfPageViewport : ContentControl
     private int _selCharCount;
     private IReadOnlyList<PvRect> _selRects = Array.Empty<PvRect>();
 
+    private bool _isDraggingFormField;
+    private bool _isResizingFormField;
+    private PdfFormField? _draggedFormField;
+    private Rect _draggedFieldStartDip;
+    private Rectangle? _fieldDragPreview;
+
     private static readonly Brush TextSelectionBrush = new SolidColorBrush(Color.FromArgb(95, 0, 120, 215));
     private static readonly Brush MatchFillBrush = new SolidColorBrush(Color.FromArgb(95, 255, 215, 0));
     private static readonly Brush ActiveMatchFillBrush = new SolidColorBrush(Color.FromArgb(145, 255, 140, 0));
@@ -78,6 +84,13 @@ public sealed class PdfPageViewport : ContentControl
     private static readonly Brush InkPreviewStroke = new SolidColorBrush(Color.FromRgb(30, 136, 229));
     private static readonly Brush RedactPreviewFill = new SolidColorBrush(Color.FromArgb(140, 20, 20, 20));
     private static readonly Brush RedactPreviewStroke = new SolidColorBrush(Color.FromRgb(220, 38, 38));
+    private static readonly Brush SignPreviewFill = new SolidColorBrush(Color.FromArgb(65, 25, 118, 210));
+    private static readonly Brush SignPreviewStroke = new SolidColorBrush(Color.FromRgb(21, 101, 192));
+    private static readonly Brush FormFieldOutlineBrush = new SolidColorBrush(Color.FromArgb(145, 25, 118, 210));
+    private static readonly Brush FormFieldHandleBrush = new SolidColorBrush(Color.FromRgb(25, 118, 210));
+    private static readonly Brush PageBorderBrush = new SolidColorBrush(Color.FromArgb(70, 0, 0, 0));
+
+    private Point _lastHoverProbeDip = new(-999, -999);
 
     static PdfPageViewport()
     {
@@ -90,6 +103,11 @@ public sealed class PdfPageViewport : ContentControl
         InkPreviewStroke.Freeze();
         RedactPreviewFill.Freeze();
         RedactPreviewStroke.Freeze();
+        SignPreviewFill.Freeze();
+        SignPreviewStroke.Freeze();
+        FormFieldOutlineBrush.Freeze();
+        FormFieldHandleBrush.Freeze();
+        PageBorderBrush.Freeze();
     }
 
     public static readonly DependencyProperty SessionProperty =
@@ -107,6 +125,10 @@ public sealed class PdfPageViewport : ContentControl
 
     public Func<string?>? PromptNoteText { get; set; }
     public Func<string?>? PromptAddText { get; set; }
+    public Func<string?>? PromptFormFieldName { get; set; }
+    public Action<PdfFormField>? FormFieldDoubleClicked { get; set; }
+    public Action<string>? ExternalUriRequested { get; set; }
+    public Action<int, PvRect>? SignatureRegionSelected { get; set; }
 
     public PdfPageViewport()
     {
@@ -468,14 +490,10 @@ public sealed class PdfPageViewport : ContentControl
         var border = new Border
         {
             Background = Brushes.White,
+            BorderBrush = PageBorderBrush,
+            BorderThickness = new Thickness(1, 1, 2, 2),
             Child = surfaceGrid,
-            Effect = new System.Windows.Media.Effects.DropShadowEffect
-            {
-                BlurRadius = 14,
-                ShadowDepth = 3,
-                Opacity = 0.28,
-                Color = Colors.Black
-            }
+            SnapsToDevicePixels = true
         };
 
         double leftDip = slot.LeftDip >= 0 ? slot.LeftDip : Math.Max(OuterPaddingDip, (canvasWidth - slot.WidthDip) * 0.5);
@@ -577,30 +595,40 @@ public sealed class PdfPageViewport : ContentControl
         try
         {
             bool darkMode = session.DarkReadingMode;
-            byte[] bgra = await Task.Run(() =>
+            await session.RenderGate.WaitAsync(ct);
+            byte[] bgra;
+            try
             {
-                byte[] pixels = session.Document.RenderPageTileBgra(
-                    key.PageIndex,
-                    key.FullWidthPx,
-                    key.FullHeightPx,
-                    key.TileX,
-                    key.TileY,
-                    key.TileWidthPx,
-                    key.TileHeightPx,
-                    key.Rotation);
-
-                if (darkMode)
+                if (ct.IsCancellationRequested) return;
+                bgra = await Task.Run(() =>
                 {
-                    // Smart dark reading inversion (maps white paper -> #1E1F22, black text -> #EAECEF)
-                    for (int i = 0; i < pixels.Length; i += 4)
+                    byte[] pixels = session.Document.RenderPageTileBgra(
+                        key.PageIndex,
+                        key.FullWidthPx,
+                        key.FullHeightPx,
+                        key.TileX,
+                        key.TileY,
+                        key.TileWidthPx,
+                        key.TileHeightPx,
+                        key.Rotation);
+
+                    if (darkMode)
                     {
-                        pixels[i] = (byte)(255 - pixels[i] * 221 / 255);         // B
-                        pixels[i + 1] = (byte)(255 - pixels[i + 1] * 224 / 255); // G
-                        pixels[i + 2] = (byte)(255 - pixels[i + 2] * 225 / 255); // R
+                        // Smart dark reading inversion (maps white paper -> #1E1F22, black text -> #EAECEF)
+                        for (int i = 0; i < pixels.Length; i += 4)
+                        {
+                            pixels[i] = (byte)(255 - pixels[i] * 221 / 255);         // B
+                            pixels[i + 1] = (byte)(255 - pixels[i + 1] * 224 / 255); // G
+                            pixels[i + 2] = (byte)(255 - pixels[i + 2] * 225 / 255); // R
+                        }
                     }
-                }
-                return pixels;
-            }, ct);
+                    return pixels;
+                }, ct);
+            }
+            finally
+            {
+                try { session.RenderGate.Release(); } catch (ObjectDisposedException) { }
+            }
 
             if (ct.IsCancellationRequested) return;
 
@@ -714,23 +742,50 @@ public sealed class PdfPageViewport : ContentControl
             }
         }
 
-        if (visual.PageIndex != session.CurrentPageIndex)
-            return;
+        // 1b. Render subtle interactive frames + resize handles for AcroForm fields on this page
+        var pageFields = session.GetFormFieldsForPage(visual.PageIndex);
+        foreach (var field in pageFields)
+        {
+            var dipRect = PdfRectToDipRect(field.Rect, origW, origH, rot, scale);
+            var outline = new Rectangle
+            {
+                Width = Math.Max(8, dipRect.Width),
+                Height = Math.Max(8, dipRect.Height),
+                Stroke = FormFieldOutlineBrush,
+                StrokeThickness = 1.0,
+                StrokeDashArray = [3, 2],
+                Fill = Brushes.Transparent
+            };
+            Canvas.SetLeft(outline, dipRect.X);
+            Canvas.SetTop(outline, dipRect.Y);
+            visual.OverlayCanvas.Children.Add(outline);
 
-        // 2. Render search match highlights
-        var highlights = session.CurrentPageHighlights;
+            var handle = new Rectangle
+            {
+                Width = 6,
+                Height = 6,
+                Fill = FormFieldHandleBrush
+            };
+            Canvas.SetLeft(handle, dipRect.Right - 6);
+            Canvas.SetTop(handle, dipRect.Bottom - 6);
+            visual.OverlayCanvas.Children.Add(handle);
+        }
+
+        // 2. Render search match highlights across ALL visible pages
+        var highlights = session.GetHighlightsForPage(visual.PageIndex);
         if (highlights.Count == 0) return;
 
-        var active = session.ActiveMatchOnCurrentPage;
+        var activeMatch = session.ActiveSearchMatch;
 
         foreach (var r in highlights)
         {
             var dipRect = PdfRectToDipRect(r, origW, origH, rot, scale);
-            bool isActive = active.HasValue &&
-                Math.Abs(active.Value.Left - r.Left) < 0.01 &&
-                Math.Abs(active.Value.Top - r.Top) < 0.01 &&
-                Math.Abs(active.Value.Right - r.Right) < 0.01 &&
-                Math.Abs(active.Value.Bottom - r.Bottom) < 0.01;
+            bool isActive = activeMatch is not null &&
+                activeMatch.PageIndex == visual.PageIndex &&
+                Math.Abs(activeMatch.Rect.Left - r.Left) < 0.01 &&
+                Math.Abs(activeMatch.Rect.Top - r.Top) < 0.01 &&
+                Math.Abs(activeMatch.Rect.Right - r.Right) < 0.01 &&
+                Math.Abs(activeMatch.Rect.Bottom - r.Bottom) < 0.01;
 
             var rectShape = new Rectangle
             {
@@ -756,11 +811,60 @@ public sealed class PdfPageViewport : ContentControl
 
         Point pos = e.GetPosition(visual.SurfaceGrid);
 
-        // Cursor mode -> Interactive Text Selection!
+        // Cursor mode -> Form Field move/resize/edit, Hyperlink activation, or Interactive Text Selection!
         if (session.ActiveTool == AnnotationTool.None)
         {
+            _dragStartDip = pos;
             ClearTextSelection();
+
+            if (HitTestFormField(visual.PageIndex, pos, session, out var hitField, out var fieldDipRect, out bool onResizeHandle))
+            {
+                if (e.ClickCount >= 2)
+                {
+                    FormFieldDoubleClicked?.Invoke(hitField);
+                    e.Handled = true;
+                    return;
+                }
+
+                _isDraggingFormField = true;
+                _isResizingFormField = onResizeHandle;
+                _draggedFormField = hitField;
+                _draggedFieldStartDip = fieldDipRect;
+                _drawingPage = visual;
+                visual.SurfaceGrid.CaptureMouse();
+
+                _fieldDragPreview = new Rectangle
+                {
+                    Width = Math.Max(10, fieldDipRect.Width),
+                    Height = Math.Max(10, fieldDipRect.Height),
+                    Fill = SignPreviewFill,
+                    Stroke = SignPreviewStroke,
+                    StrokeThickness = 1.5,
+                    StrokeDashArray = [4, 2]
+                };
+                Canvas.SetLeft(_fieldDragPreview, fieldDipRect.X);
+                Canvas.SetTop(_fieldDragPreview, fieldDipRect.Y);
+                visual.OverlayCanvas.Children.Add(_fieldDragPreview);
+                e.Handled = true;
+                return;
+            }
+
             var pt = DipPointToPdfPoint(pos, visual.PageIndex, session);
+            var link = session.Document.GetLinkAtPoint(visual.PageIndex, pt.X, pt.Y);
+            if (link.Found)
+            {
+                if (link.DestPageIndex is int dstPage && dstPage >= 0 && dstPage < session.PageCount)
+                {
+                    session.CurrentPageIndex = dstPage;
+                }
+                else if (!string.IsNullOrWhiteSpace(link.Uri))
+                {
+                    ExternalUriRequested?.Invoke(link.Uri);
+                }
+                e.Handled = true;
+                return;
+            }
+
             int charIdx = session.Document.GetCharIndexAtPos(visual.PageIndex, pt.X, pt.Y, tolerancePt: 12.0);
             if (charIdx >= 0)
             {
@@ -807,7 +911,7 @@ public sealed class PdfPageViewport : ContentControl
         _dragStartDip = pos;
         visual.SurfaceGrid.CaptureMouse();
 
-        if (session.ActiveTool is AnnotationTool.Highlight or AnnotationTool.Square or AnnotationTool.Redact)
+        if (session.ActiveTool is AnnotationTool.Highlight or AnnotationTool.Square or AnnotationTool.Redact or AnnotationTool.SignStamp or AnnotationTool.AddFormField)
         {
             _previewRect = new Rectangle
             {
@@ -815,12 +919,14 @@ public sealed class PdfPageViewport : ContentControl
                 {
                     AnnotationTool.Highlight => HighlightPreviewBrush,
                     AnnotationTool.Redact => RedactPreviewFill,
+                    AnnotationTool.SignStamp or AnnotationTool.AddFormField => SignPreviewFill,
                     _ => Brushes.Transparent
                 },
                 Stroke = session.ActiveTool switch
                 {
                     AnnotationTool.Square => SquarePreviewStroke,
                     AnnotationTool.Redact => RedactPreviewStroke,
+                    AnnotationTool.SignStamp or AnnotationTool.AddFormField => SignPreviewStroke,
                     _ => null
                 },
                 StrokeThickness = session.ActiveTool == AnnotationTool.Highlight ? 0 : 2.0,
@@ -852,6 +958,17 @@ public sealed class PdfPageViewport : ContentControl
 
     private void OnPageMouseMove(ActivePageVisual visual, MouseEventArgs e)
     {
+        if (_isDraggingFormField && _draggedFormField is not null && ReferenceEquals(_drawingPage, visual) && _fieldDragPreview is not null)
+        {
+            Point cur = e.GetPosition(visual.SurfaceGrid);
+            Rect updated = ComputeMovedOrResizedFieldRect(cur, visual.SurfaceGrid.ActualWidth, visual.SurfaceGrid.ActualHeight);
+            Canvas.SetLeft(_fieldDragPreview, updated.X);
+            Canvas.SetTop(_fieldDragPreview, updated.Y);
+            _fieldDragPreview.Width = updated.Width;
+            _fieldDragPreview.Height = updated.Height;
+            return;
+        }
+
         if (_isSelectingText && ReferenceEquals(_drawingPage, visual) && Session is not null)
         {
             Point selPos = e.GetPosition(visual.SurfaceGrid);
@@ -872,7 +989,28 @@ public sealed class PdfPageViewport : ContentControl
             return;
         }
 
-        if (!_isDrawing || !ReferenceEquals(_drawingPage, visual) || Session is null) return;
+        if (!_isDrawing || !ReferenceEquals(_drawingPage, visual) || Session is null)
+        {
+            if (Session is { ActiveTool: AnnotationTool.None, PageCount: > 0 })
+            {
+                Point hoverPos = e.GetPosition(visual.SurfaceGrid);
+                if ((hoverPos - _lastHoverProbeDip).Length >= 4.0)
+                {
+                    _lastHoverProbeDip = hoverPos;
+                    if (HitTestFormField(visual.PageIndex, hoverPos, Session, out _, out _, out bool onResize))
+                    {
+                        visual.SurfaceGrid.Cursor = onResize ? Cursors.SizeNWSE : Cursors.SizeAll;
+                    }
+                    else
+                    {
+                        var hoverPt = DipPointToPdfPoint(hoverPos, visual.PageIndex, Session);
+                        var link = Session.Document.GetLinkAtPoint(visual.PageIndex, hoverPt.X, hoverPt.Y);
+                        visual.SurfaceGrid.Cursor = link.Found ? Cursors.Hand : Cursors.Arrow;
+                    }
+                }
+            }
+            return;
+        }
         Point pos = e.GetPosition(visual.SurfaceGrid);
         pos.X = Math.Clamp(pos.X, 0, visual.SurfaceGrid.ActualWidth);
         pos.Y = Math.Clamp(pos.Y, 0, visual.SurfaceGrid.ActualHeight);
@@ -896,6 +1034,43 @@ public sealed class PdfPageViewport : ContentControl
 
     private void OnPageMouseLeftButtonUp(ActivePageVisual visual, MouseButtonEventArgs e)
     {
+        if (_isDraggingFormField && _draggedFormField is not null && ReferenceEquals(_drawingPage, visual) && Session is not null)
+        {
+            var field = _draggedFormField;
+            _isDraggingFormField = false;
+            _draggedFormField = null;
+            _drawingPage = null;
+            visual.SurfaceGrid.ReleaseMouseCapture();
+
+            if (_fieldDragPreview is not null)
+            {
+                visual.OverlayCanvas.Children.Remove(_fieldDragPreview);
+                _fieldDragPreview = null;
+            }
+
+            Point fieldEndPos = e.GetPosition(visual.SurfaceGrid);
+            Rect finalDip = ComputeMovedOrResizedFieldRect(fieldEndPos, visual.SurfaceGrid.ActualWidth, visual.SurfaceGrid.ActualHeight);
+            bool changed = Math.Abs(finalDip.X - _draggedFieldStartDip.X) >= 2.0 ||
+                           Math.Abs(finalDip.Y - _draggedFieldStartDip.Y) >= 2.0 ||
+                           Math.Abs(finalDip.Width - _draggedFieldStartDip.Width) >= 2.0 ||
+                           Math.Abs(finalDip.Height - _draggedFieldStartDip.Height) >= 2.0;
+            if (changed)
+            {
+                var p1 = DipPointToPdfPoint(new Point(finalDip.Left, finalDip.Top), visual.PageIndex, Session);
+                var p2 = DipPointToPdfPoint(new Point(finalDip.Right, finalDip.Bottom), visual.PageIndex, Session);
+                var newPdfRect = new PvRect
+                {
+                    Left = Math.Min(p1.X, p2.X),
+                    Right = Math.Max(p1.X, p2.X),
+                    Bottom = Math.Min(p1.Y, p2.Y),
+                    Top = Math.Max(p1.Y, p2.Y)
+                };
+                Session.MoveOrResizeFormField(field.Name, newPdfRect, visual.PageIndex);
+            }
+            e.Handled = true;
+            return;
+        }
+
         if (_isSelectingText && ReferenceEquals(_drawingPage, visual))
         {
             _isSelectingText = false;
@@ -905,7 +1080,28 @@ public sealed class PdfPageViewport : ContentControl
             return;
         }
 
-        if (!_isDrawing || !ReferenceEquals(_drawingPage, visual) || Session is null) return;
+        if (!_isDrawing || !ReferenceEquals(_drawingPage, visual) || Session is null)
+        {
+            if (Session is { ActiveTool: AnnotationTool.None, PageCount: > 0 })
+            {
+                Point hoverPos = e.GetPosition(visual.SurfaceGrid);
+                if ((hoverPos - _lastHoverProbeDip).Length >= 4.0)
+                {
+                    _lastHoverProbeDip = hoverPos;
+                    if (HitTestFormField(visual.PageIndex, hoverPos, Session, out _, out _, out bool onResize))
+                    {
+                        visual.SurfaceGrid.Cursor = onResize ? Cursors.SizeNWSE : Cursors.SizeAll;
+                    }
+                    else
+                    {
+                        var hoverPt = DipPointToPdfPoint(hoverPos, visual.PageIndex, Session);
+                        var link = Session.Document.GetLinkAtPoint(visual.PageIndex, hoverPt.X, hoverPt.Y);
+                        visual.SurfaceGrid.Cursor = link.Found ? Cursors.Hand : Cursors.Arrow;
+                    }
+                }
+            }
+            return;
+        }
 
         _isDrawing = false;
         _drawingPage = null;
@@ -939,6 +1135,20 @@ public sealed class PdfPageViewport : ContentControl
                 }
                 else if (Session.ActiveTool == AnnotationTool.Square) Session.AddSquare(pdfRect, Session.ActiveColorRgba);
                 else if (Session.ActiveTool == AnnotationTool.Redact) Session.ApplyPermanentRedaction(pdfRect);
+                else if (Session.ActiveTool == AnnotationTool.SignStamp)
+                {
+                    Session.ActiveTool = AnnotationTool.None;
+                    SignatureRegionSelected?.Invoke(visual.PageIndex, pdfRect);
+                }
+                else if (Session.ActiveTool == AnnotationTool.AddFormField)
+                {
+                    Session.ActiveTool = AnnotationTool.None;
+                    string? fieldName = PromptFormFieldName is not null ? PromptFormFieldName() : $"Campo_{Session.FormFields.Count + 1}";
+                    if (!string.IsNullOrWhiteSpace(fieldName))
+                    {
+                        Session.AddTextFormField(fieldName.Trim(), pdfRect, "", visual.PageIndex);
+                    }
+                }
             }
         }
         else if (_previewInk is not null)
@@ -993,5 +1203,55 @@ public sealed class PdfPageViewport : ContentControl
             Math.Min(uTop, uBottom) * scale,
             Math.Abs(uRight - uLeft) * scale,
             Math.Abs(uBottom - uTop) * scale);
+    }
+
+    private bool HitTestFormField(
+        int pageIndex,
+        Point dipPos,
+        DocumentSession session,
+        out PdfFormField hitField,
+        out Rect fieldDipRect,
+        out bool onResizeHandle)
+    {
+        hitField = null!;
+        fieldDipRect = default;
+        onResizeHandle = false;
+
+        var fields = session.GetFormFieldsForPage(pageIndex);
+        if (fields.Count == 0) return false;
+
+        var pageInfo = session.Pages[pageIndex];
+        double scale = (96.0 / 72.0) * session.Zoom;
+
+        for (int i = fields.Count - 1; i >= 0; i--)
+        {
+            var r = PdfRectToDipRect(fields[i].Rect, pageInfo.WidthPt, pageInfo.HeightPt, session.Rotation, scale);
+            var hitBox = new Rect(r.X - 3, r.Y - 3, r.Width + 6, r.Height + 6);
+            if (hitBox.Contains(dipPos))
+            {
+                hitField = fields[i];
+                fieldDipRect = r;
+                onResizeHandle = dipPos.X >= r.Right - 10 && dipPos.Y >= r.Bottom - 10;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Rect ComputeMovedOrResizedFieldRect(Point currentDip, double maxW, double maxH)
+    {
+        double dx = currentDip.X - _dragStartDip.X;
+        double dy = currentDip.Y - _dragStartDip.Y;
+
+        if (_isResizingFormField)
+        {
+            double newW = Math.Clamp(_draggedFieldStartDip.Width + dx, 24.0, Math.Max(24.0, maxW - _draggedFieldStartDip.X));
+            double newH = Math.Clamp(_draggedFieldStartDip.Height + dy, 14.0, Math.Max(14.0, maxH - _draggedFieldStartDip.Y));
+            return new Rect(_draggedFieldStartDip.X, _draggedFieldStartDip.Y, newW, newH);
+        }
+
+        double newX = Math.Clamp(_draggedFieldStartDip.X + dx, 0.0, Math.Max(0.0, maxW - _draggedFieldStartDip.Width));
+        double newY = Math.Clamp(_draggedFieldStartDip.Y + dy, 0.0, Math.Max(0.0, maxH - _draggedFieldStartDip.Height));
+        return new Rect(newX, newY, _draggedFieldStartDip.Width, _draggedFieldStartDip.Height);
     }
 }

@@ -23,21 +23,45 @@ public static class PadesSignatureService
     private static readonly Oid TimeStampTokenOid = new("1.2.840.1.113549.1.9.16.2.14");
 
     /// <summary>
-    /// Lists signing-capable certificates with private keys from the Windows CurrentUser Personal store (CNG / Smart Cards).
+    /// Lists signing-capable certificates with private keys from the Windows CurrentUser Personal store (CNG / Smart Cards),
+    /// filtering out expired certificates and certificates whose KeyUsage explicitly forbids digital signatures.
     /// </summary>
-    public static IReadOnlyList<X509Certificate2> ListWindowsSigningCertificates()
+    public static IReadOnlyList<X509Certificate2> ListWindowsSigningCertificates(bool includeExpired = false)
     {
         var result = new List<X509Certificate2>();
+        DateTime now = DateTime.Now;
         using var store = new X509Store(StoreName.My, StoreLocation.CurrentUser);
         store.Open(OpenFlags.ReadOnly | OpenFlags.OpenExistingOnly);
         foreach (var cert in store.Certificates)
         {
-            if (cert.HasPrivateKey)
+            if (!cert.HasPrivateKey) continue;
+            if (!includeExpired && (now < cert.NotBefore || now > cert.NotAfter)) continue;
+
+            var ku = cert.Extensions.OfType<X509KeyUsageExtension>().FirstOrDefault();
+            if (ku is not null &&
+                (ku.KeyUsages & (X509KeyUsageFlags.DigitalSignature | X509KeyUsageFlags.NonRepudiation)) == 0)
             {
-                result.Add(cert);
+                continue;
             }
+
+            result.Add(cert);
         }
         return result;
+    }
+
+    /// <summary>
+    /// Loads a PKCS#12 (.pfx / .p12) signing certificate with private key from disk.
+    /// </summary>
+    public static X509Certificate2 LoadCertificateFromPfx(string pfxFilePath, string? password)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pfxFilePath);
+        var cert = X509CertificateLoader.LoadPkcs12FromFile(
+            pfxFilePath,
+            password,
+            X509KeyStorageFlags.EphemeralKeySet | X509KeyStorageFlags.Exportable);
+        if (!cert.HasPrivateKey)
+            throw new InvalidOperationException("El archivo PFX/P12 no contiene una clave privada de firma.");
+        return cert;
     }
 
     /// <summary>
@@ -76,11 +100,11 @@ public static class PadesSignatureService
             DefaultReservedBytes,
             sourcePassword);
 
-        // 2. Read prepared file and locate exact <0000...> placeholder bounds
+        // 2. Read prepared file and locate exact <0000...> placeholder bounds (last occurrence for incremental co-signatures)
         byte[] fileBytes = File.ReadAllBytes(destinationPdfPath);
         string hexZeros = "<" + new string('0', DefaultReservedBytes * 2) + ">";
         byte[] pattern = Encoding.ASCII.GetBytes(hexZeros);
-        int contentsStart = FindSubsequence(fileBytes, pattern);
+        int contentsStart = FindLastSubsequence(fileBytes, pattern);
         if (contentsStart < 0)
             throw new InvalidOperationException("No se encontró el marcador de firma /Contents en el PDF preparado.");
 
@@ -132,7 +156,11 @@ public static class PadesSignatureService
         var rawSigs = document.GetSignatures();
         if (rawSigs.Count == 0) return Array.Empty<PdfSignatureVerificationResult>();
 
-        byte[] fileBytes = File.ReadAllBytes(document.FilePath);
+        string backingPath = document.ActiveSourcePath;
+        if (string.IsNullOrWhiteSpace(backingPath) || !File.Exists(backingPath))
+            return Array.Empty<PdfSignatureVerificationResult>();
+
+        byte[] fileBytes = File.ReadAllBytes(backingPath);
         var results = new List<PdfSignatureVerificationResult>(rawSigs.Count);
 
         foreach (var sig in rawSigs)
@@ -248,9 +276,9 @@ public static class PadesSignatureService
         return token.AsSignedCms().Encode();
     }
 
-    private static int FindSubsequence(byte[] haystack, byte[] needle)
+    private static int FindLastSubsequence(byte[] haystack, byte[] needle)
     {
-        for (int i = 0; i <= haystack.Length - needle.Length; i++)
+        for (int i = haystack.Length - needle.Length; i >= 0; i--)
         {
             if (haystack[i] != needle[0]) continue;
             bool match = true;

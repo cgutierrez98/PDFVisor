@@ -54,7 +54,9 @@ public enum AnnotationTool
     Note,
     Ink,
     AddText,
-    Redact
+    Redact,
+    SignStamp,
+    AddFormField
 }
 
 public sealed class DocumentSession : ObservableObject, IDisposable
@@ -71,8 +73,15 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     private uint _activeColorRgba = 0xE53935FF;
     private float _activeFontSize = 14f;
     private string _searchQuery = string.Empty;
+    private bool _searchMatchCase;
+    private bool _searchWholeWord;
     private List<SearchMatch> _searchMatches = [];
     private int _activeMatchIndex = -1;
+
+    /// <summary>
+    /// Limits concurrent background PDFium renders (tiles + thumbnails) to prevent ThreadPool starvation over g_pdfium_mutex.
+    /// </summary>
+    public SemaphoreSlim RenderGate { get; } = new(2, 2);
 
     public string FilePath => _document.FilePath;
     public string FileName => Path.GetFileName(_document.FilePath);
@@ -191,7 +200,30 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         private set => SetProperty(ref _searchQuery, value);
     }
 
+    public bool SearchMatchCase
+    {
+        get => _searchMatchCase;
+        set => SetProperty(ref _searchMatchCase, value);
+    }
+
+    public bool SearchWholeWord
+    {
+        get => _searchWholeWord;
+        set => SetProperty(ref _searchWholeWord, value);
+    }
+
     public int TotalSearchMatches => _searchMatches.Count;
+
+    public SearchMatch? ActiveSearchMatch =>
+        ActiveMatchIndex >= 0 && ActiveMatchIndex < _searchMatches.Count
+            ? _searchMatches[ActiveMatchIndex]
+            : null;
+
+    public IReadOnlyList<PvRect> GetHighlightsForPage(int pageIndex) =>
+        _searchMatches
+            .Where(m => m.PageIndex == pageIndex)
+            .Select(m => m.Rect)
+            .ToArray();
 
     public int ActiveMatchIndex
     {
@@ -281,7 +313,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         string? windowsTtf = FindWindowsUnicodeFont();
         if (hasNonAscii && windowsTtf is not null)
         {
-            _document.AddUnicodeTextObject(CurrentPageIndex, text, windowsTtf, fontSize, xPt, yPt, rgba);
+            History.Execute(new AddUnicodeTextObjectCommand(_document, CurrentPageIndex, text, windowsTtf, fontSize, xPt, yPt, rgba));
             OnDocumentMutated(CurrentPageIndex);
             return;
         }
@@ -324,8 +356,22 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     public void AddInvisibleOcrText(string text, double xPt, double yPt, float fontSize = 12f)
     {
         if (PageCount == 0 || string.IsNullOrWhiteSpace(text)) return;
-        _document.AddInvisibleOcrText(CurrentPageIndex, text, xPt, yPt, fontSize);
-        OnDocumentMutated(CurrentPageIndex);
+        AddInvisibleOcrWordsBatch(CurrentPageIndex, [new PdfOcrWord(text, xPt, yPt, fontSize)]);
+    }
+
+    public int AddInvisibleOcrWordsBatch(int pageIndex, IReadOnlyList<PdfOcrWord> words)
+    {
+        if (PageCount == 0 || pageIndex < 0 || pageIndex >= PageCount || words.Count == 0) return 0;
+        string? ttf = FindWindowsUnicodeFont();
+        int totalAdded = 0;
+        History.Execute(new BatchGeneratedObjectsCommand(_document, $"OCR en página {pageIndex + 1}", doc =>
+        {
+            var (firstIdx, added) = doc.AddInvisibleOcrTextBatch(pageIndex, words, ttf);
+            totalAdded = added;
+            return added > 0 ? [(pageIndex, firstIdx, added)] : [];
+        }));
+        OnDocumentMutated(pageIndex);
+        return totalAdded;
     }
 
     public void SanitizeAndExport(string destinationPath)
@@ -334,7 +380,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         try
         {
             _document.SaveAs(tempSrc, incremental: false);
-            QpdfTools.SanitizeMetadata(tempSrc, destinationPath);
+            QpdfTools.SanitizeMetadata(tempSrc, destinationPath, sourcePassword: null);
         }
         finally
         {
@@ -347,11 +393,15 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         FormFields.Clear();
         try
         {
-            foreach (var field in QpdfTools.GetFormFields(_document.FilePath, _document.Password))
+            string srcPath = _document.ActiveSourcePath;
+            if (!string.IsNullOrWhiteSpace(srcPath) && File.Exists(srcPath))
             {
-                if (!string.Equals(field.FieldType, "/Sig", StringComparison.Ordinal))
+                foreach (var field in QpdfTools.GetFormFields(srcPath, _document.ActivePassword))
                 {
-                    FormFields.Add(field);
+                    if (!string.Equals(field.FieldType, "/Sig", StringComparison.Ordinal))
+                    {
+                        FormFields.Add(field);
+                    }
                 }
             }
         }
@@ -374,39 +424,52 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         }
     }
 
-    public void AddTextFormField(string fieldName, PvRect pdfRect, string defaultValue = "")
+    public IReadOnlyList<PdfFormField> GetFormFieldsForPage(int pageIndex) =>
+        FormFields
+            .Where(f => f.PageIndex == pageIndex && f.Rect.Right > f.Rect.Left && f.Rect.Top > f.Rect.Bottom)
+            .ToArray();
+
+    public void AddTextFormField(string fieldName, PvRect pdfRect, string defaultValue = "", int? targetPageIndex = null)
     {
         if (PageCount == 0) return;
-        string tempSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_form_src_{Guid.NewGuid():N}.pdf");
-        string tempOut = Path.Combine(Path.GetTempPath(), $"pdfvisor_form_out_{Guid.NewGuid():N}.pdf");
-        try
-        {
-            _document.SaveAs(tempSrc, incremental: false);
-            QpdfTools.AddTextField(tempSrc, tempOut, CurrentPageIndex, fieldName, pdfRect, defaultValue);
-            ApplyExternalPdfAndReload(tempOut);
-        }
-        finally
-        {
-            if (File.Exists(tempSrc)) try { File.Delete(tempSrc); } catch { }
-            if (File.Exists(tempOut)) try { File.Delete(tempOut); } catch { }
-        }
+        int pageIdx = targetPageIndex is int p ? Math.Clamp(p, 0, PageCount - 1) : CurrentPageIndex;
+        History.Execute(new SnapshotPdfMutationCommand(
+            _document,
+            $"Añadir campo \"{fieldName}\"",
+            (src, dst) => QpdfTools.AddTextField(src, dst, pageIdx, fieldName, pdfRect, defaultValue, sourcePassword: null)));
+        OnExternalWorkingCopyMutated(pageIdx);
+    }
+
+    public void MoveOrResizeFormField(string fieldName, PvRect newPdfRect, int? targetPageIndex = null)
+    {
+        if (PageCount == 0) return;
+        int pageIdx = targetPageIndex is int p ? Math.Clamp(p, 0, PageCount - 1) : CurrentPageIndex;
+        History.Execute(new SnapshotPdfMutationCommand(
+            _document,
+            $"Mover/redimensionar campo \"{fieldName}\"",
+            (src, dst) => QpdfTools.SetFormFieldRect(src, dst, fieldName, newPdfRect, sourcePassword: null)));
+        OnExternalWorkingCopyMutated(pageIdx);
+    }
+
+    public void RemoveFormField(string fieldName)
+    {
+        if (PageCount == 0) return;
+        int pageIdx = CurrentPageIndex;
+        History.Execute(new SnapshotPdfMutationCommand(
+            _document,
+            $"Eliminar campo \"{fieldName}\"",
+            (src, dst) => QpdfTools.RemoveFormField(src, dst, fieldName, sourcePassword: null)));
+        OnExternalWorkingCopyMutated(pageIdx);
     }
 
     public void SetFormFieldValue(string fieldName, string newValue)
     {
-        string tempSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_form_src_{Guid.NewGuid():N}.pdf");
-        string tempOut = Path.Combine(Path.GetTempPath(), $"pdfvisor_form_out_{Guid.NewGuid():N}.pdf");
-        try
-        {
-            _document.SaveAs(tempSrc, incremental: false);
-            QpdfTools.SetFormFieldValue(tempSrc, tempOut, fieldName, newValue);
-            ApplyExternalPdfAndReload(tempOut);
-        }
-        finally
-        {
-            if (File.Exists(tempSrc)) try { File.Delete(tempSrc); } catch { }
-            if (File.Exists(tempOut)) try { File.Delete(tempOut); } catch { }
-        }
+        int pageIdx = CurrentPageIndex;
+        History.Execute(new SnapshotPdfMutationCommand(
+            _document,
+            $"Rellenar campo \"{fieldName}\"",
+            (src, dst) => QpdfTools.SetFormFieldValue(src, dst, fieldName, newValue, sourcePassword: null)));
+        OnExternalWorkingCopyMutated(pageIdx);
     }
 
     public void SignPadesAndExport(
@@ -414,29 +477,60 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         System.Security.Cryptography.X509Certificates.X509Certificate2 certificate,
         string? reason = "Firmado digitalmente con PDFVisor",
         string? location = null,
-        string? tsaUrl = null)
+        string? tsaUrl = null,
+        PvRect? customWidgetRect = null)
     {
-        string tempSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_sig_src_{Guid.NewGuid():N}.pdf");
+        bool hasPriorSignatures = Signatures.Count > 0 && !IsModified && File.Exists(_document.ActiveSourcePath);
+        string? tempSrc = null;
         try
         {
-            _document.SaveAs(tempSrc, incremental: false);
-            var sigRect = new PvRect { Left = 36, Bottom = 36, Right = 240, Top = 86 };
-            PadesSignatureService.SignPdfPades(tempSrc, destinationPath, certificate, CurrentPageIndex, sigRect, reason, location, tsaUrl: tsaUrl);
+            string sourceForSigning;
+            if (hasPriorSignatures)
+            {
+                // Preserve original signed bytes verbatim so incremental co-signing keeps prior signatures valid!
+                sourceForSigning = _document.ActiveSourcePath;
+            }
+            else
+            {
+                tempSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_sig_src_{Guid.NewGuid():N}.pdf");
+                _document.SaveAs(tempSrc, incremental: false);
+                sourceForSigning = tempSrc;
+            }
+
+            // Offset subsequent default signature stamps horizontally so co-signatures do not overlap visually
+            int offsetIdx = Signatures.Count % 3;
+            double left = 36 + offsetIdx * 182;
+            var sigRect = customWidgetRect ?? new PvRect { Left = left, Bottom = 36, Right = left + 174, Top = 86 };
+            string? srcPwd = hasPriorSignatures ? _document.ActivePassword : null;
+
+            PadesSignatureService.SignPdfPades(
+                sourceForSigning,
+                destinationPath,
+                certificate,
+                CurrentPageIndex,
+                sigRect,
+                reason,
+                location,
+                sourcePassword: srcPwd,
+                tsaUrl: tsaUrl);
         }
         finally
         {
-            if (File.Exists(tempSrc)) try { File.Delete(tempSrc); } catch { }
+            if (tempSrc is not null && File.Exists(tempSrc)) try { File.Delete(tempSrc); } catch { }
         }
     }
 
-    private void ApplyExternalPdfAndReload(string updatedPdfPath)
+    private void OnExternalWorkingCopyMutated(int pageIdx)
     {
-        _document.ReplaceFileAndReload(updatedPdfPath);
-        IsModified = false;
+        IsModified = true;
         RebuildPageList();
+        _currentPageIndex = Math.Clamp(pageIdx, 0, Math.Max(0, PageCount - 1));
         RefreshFormFieldsAndSignatures();
+        RefreshCurrentPageObjects();
         DocumentRevision++;
         OnPropertyChanged(nameof(PageCount));
+        OnPropertyChanged(nameof(CurrentPageIndex));
+        OnPropertyChanged(nameof(CurrentPageNumber));
         OnPropertyChanged(nameof(CurrentPageSizeText));
     }
 
@@ -481,13 +575,20 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         if (PageCount == 0 || string.IsNullOrWhiteSpace(text)) return;
         uint rgba = (0x80808000u) | opacity;
-        for (int i = 0; i < PageCount; i++)
+        string? ttf = text.Any(c => c > 127) ? FindWindowsUnicodeFont() : null;
+        History.Execute(new BatchGeneratedObjectsCommand(_document, $"Marca de agua \"{text}\"", doc =>
         {
-            var size = _document.GetPageSize(i);
-            double x = size.WidthPt * 0.18;
-            double y = size.HeightPt * 0.30;
-            _document.AddRotatedText(i, text, fontSize, x, y, angleDegrees, rgba);
-        }
+            var inserted = new List<(int PageIndex, int FirstObjIndex, int Count)>(doc.PageCount);
+            for (int i = 0; i < doc.PageCount; i++)
+            {
+                var size = doc.GetPageSize(i);
+                double x = size.WidthPt * 0.18;
+                double y = size.HeightPt * 0.30;
+                int objIdx = doc.AddRotatedUnicodeText(i, text, ttf, fontSize, x, y, angleDegrees, rgba);
+                inserted.Add((i, objIdx, 1));
+            }
+            return inserted;
+        }));
         OnDocumentMutated(CurrentPageIndex);
     }
 
@@ -501,16 +602,23 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         if (PageCount == 0 || string.IsNullOrWhiteSpace(text)) return;
         int total = PageCount;
         uint rgba = (0x80808000u) | opacity;
+        string? ttf = text.Any(c => c > 127) ? FindWindowsUnicodeFont() : null;
         await Task.Run(() =>
         {
-            for (int i = 0; i < total; i++)
+            History.Execute(new BatchGeneratedObjectsCommand(_document, $"Marca de agua \"{text}\"", doc =>
             {
-                var size = _document.GetPageSize(i);
-                double x = size.WidthPt * 0.18;
-                double y = size.HeightPt * 0.30;
-                _document.AddRotatedText(i, text, fontSize, x, y, angleDegrees, rgba);
-                progress?.Report((i + 1, total));
-            }
+                var inserted = new List<(int PageIndex, int FirstObjIndex, int Count)>(total);
+                for (int i = 0; i < total; i++)
+                {
+                    var size = doc.GetPageSize(i);
+                    double x = size.WidthPt * 0.18;
+                    double y = size.HeightPt * 0.30;
+                    int objIdx = doc.AddRotatedUnicodeText(i, text, ttf, fontSize, x, y, angleDegrees, rgba);
+                    inserted.Add((i, objIdx, 1));
+                    progress?.Report((i + 1, total));
+                }
+                return inserted;
+            }));
         });
         OnDocumentMutated(CurrentPageIndex);
     }
@@ -519,16 +627,26 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         if (PageCount == 0) return;
         int total = PageCount;
-        for (int i = 0; i < total; i++)
+        string? ttf = FindWindowsUnicodeFont();
+        History.Execute(new BatchGeneratedObjectsCommand(_document, "Numeración de páginas", doc =>
         {
-            var size = _document.GetPageSize(i);
-            string label = format
-                .Replace("{page}", (i + 1).ToString())
-                .Replace("{total}", total.ToString());
-            double x = Math.Max(36, (size.WidthPt - label.Length * fontSize * 0.5) * 0.5);
-            double y = 24.0;
-            _document.AddTextObject(i, label, "Helvetica", fontSize, x, y, 0x444444FF);
-        }
+            var inserted = new List<(int PageIndex, int FirstObjIndex, int Count)>(total);
+            for (int i = 0; i < total; i++)
+            {
+                var size = doc.GetPageSize(i);
+                string label = format
+                    .Replace("{page}", (i + 1).ToString())
+                    .Replace("{total}", total.ToString());
+                double x = Math.Max(36, (size.WidthPt - label.Length * fontSize * 0.5) * 0.5);
+                double y = 24.0;
+                bool nonAscii = label.Any(c => c > 127);
+                int objIdx = (nonAscii && ttf is not null)
+                    ? doc.AddUnicodeTextObject(i, label, ttf, fontSize, x, y, 0x444444FF)
+                    : doc.AddTextObject(i, label, "Helvetica", fontSize, x, y, 0x444444FF);
+                inserted.Add((i, objIdx, 1));
+            }
+            return inserted;
+        }));
         OnDocumentMutated(CurrentPageIndex);
     }
 
@@ -539,63 +657,59 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         if (PageCount == 0) return;
         int total = PageCount;
+        string? ttf = FindWindowsUnicodeFont();
         await Task.Run(() =>
         {
-            for (int i = 0; i < total; i++)
+            History.Execute(new BatchGeneratedObjectsCommand(_document, "Numeración de páginas", doc =>
             {
-                var size = _document.GetPageSize(i);
-                string label = format
-                    .Replace("{page}", (i + 1).ToString())
-                    .Replace("{total}", total.ToString());
-                double x = Math.Max(36, (size.WidthPt - label.Length * fontSize * 0.5) * 0.5);
-                double y = 24.0;
-                _document.AddTextObject(i, label, "Helvetica", fontSize, x, y, 0x444444FF);
-                progress?.Report((i + 1, total));
-            }
+                var inserted = new List<(int PageIndex, int FirstObjIndex, int Count)>(total);
+                for (int i = 0; i < total; i++)
+                {
+                    var size = doc.GetPageSize(i);
+                    string label = format
+                        .Replace("{page}", (i + 1).ToString())
+                        .Replace("{total}", total.ToString());
+                    double x = Math.Max(36, (size.WidthPt - label.Length * fontSize * 0.5) * 0.5);
+                    double y = 24.0;
+                    bool nonAscii = label.Any(c => c > 127);
+                    int objIdx = (nonAscii && ttf is not null)
+                        ? doc.AddUnicodeTextObject(i, label, ttf, fontSize, x, y, 0x444444FF)
+                        : doc.AddTextObject(i, label, "Helvetica", fontSize, x, y, 0x444444FF);
+                    inserted.Add((i, objIdx, 1));
+                    progress?.Report((i + 1, total));
+                }
+                return inserted;
+            }));
         });
         OnDocumentMutated(CurrentPageIndex);
     }
 
     public PdfMetadata GetMetadata()
     {
-        return QpdfTools.GetMetadata(_document.FilePath, _document.Password);
+        return QpdfTools.GetMetadata(_document.ActiveSourcePath, _document.ActivePassword);
     }
 
     public void UpdateMetadata(string title, string author, string subject, string keywords)
     {
-        string tempSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_meta_src_{Guid.NewGuid():N}.pdf");
-        string tempOut = Path.Combine(Path.GetTempPath(), $"pdfvisor_meta_out_{Guid.NewGuid():N}.pdf");
-        try
-        {
-            _document.SaveAs(tempSrc, incremental: false);
-            QpdfTools.SetMetadata(tempSrc, tempOut, title, author, subject, keywords);
-            ApplyExternalPdfAndReload(tempOut);
-        }
-        finally
-        {
-            if (File.Exists(tempSrc)) try { File.Delete(tempSrc); } catch { }
-            if (File.Exists(tempOut)) try { File.Delete(tempOut); } catch { }
-        }
+        int pageIdx = CurrentPageIndex;
+        History.Execute(new SnapshotPdfMutationCommand(
+            _document,
+            "Editar metadatos",
+            (src, dst) => QpdfTools.SetMetadata(src, dst, title, author, subject, keywords, sourcePassword: null)));
+        OnExternalWorkingCopyMutated(pageIdx);
     }
 
     public async Task UpdateMetadataAsync(string title, string author, string subject, string keywords)
     {
-        string tempSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_meta_src_{Guid.NewGuid():N}.pdf");
-        string tempOut = Path.Combine(Path.GetTempPath(), $"pdfvisor_meta_out_{Guid.NewGuid():N}.pdf");
-        try
+        int pageIdx = CurrentPageIndex;
+        await Task.Run(() =>
         {
-            await Task.Run(() =>
-            {
-                _document.SaveAs(tempSrc, incremental: false);
-                QpdfTools.SetMetadata(tempSrc, tempOut, title, author, subject, keywords);
-            });
-            ApplyExternalPdfAndReload(tempOut);
-        }
-        finally
-        {
-            if (File.Exists(tempSrc)) try { File.Delete(tempSrc); } catch { }
-            if (File.Exists(tempOut)) try { File.Delete(tempOut); } catch { }
-        }
+            History.Execute(new SnapshotPdfMutationCommand(
+                _document,
+                "Editar metadatos",
+                (src, dst) => QpdfTools.SetMetadata(src, dst, title, author, subject, keywords, sourcePassword: null)));
+        });
+        OnExternalWorkingCopyMutated(pageIdx);
     }
 
     public void DeleteCurrentPage()
@@ -679,6 +793,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         if (!History.CanUndo) return;
         History.Undo();
+        RefreshFormFieldsAndSignatures();
         OnDocumentMutated(Math.Clamp(CurrentPageIndex, 0, Math.Max(0, PageCount - 1)));
     }
 
@@ -686,6 +801,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         if (!History.CanRedo) return;
         History.Redo();
+        RefreshFormFieldsAndSignatures();
         OnDocumentMutated(Math.Clamp(CurrentPageIndex, 0, Math.Max(0, PageCount - 1)));
     }
 
@@ -693,6 +809,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         _document.SaveInPlace(incremental: false);
         IsModified = false;
+        RefreshFormFieldsAndSignatures();
     }
 
     public void SaveAs(string destinationPath)
@@ -702,6 +819,11 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         {
             IsModified = false;
         }
+    }
+
+    public void NotifyExternalBatchMutated(int pageIndex)
+    {
+        OnDocumentMutated(pageIndex);
     }
 
     private void OnDocumentMutated(int newCurrentPage)
@@ -731,9 +853,14 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         }
     }
 
-    public async Task<int> SearchAsync(string query, bool matchCase = false, bool wholeWord = false, CancellationToken ct = default)
+    public async Task<int> SearchAsync(string query, bool? matchCase = null, bool? wholeWord = null, CancellationToken ct = default)
     {
         SearchQuery = query;
+        bool mc = matchCase ?? SearchMatchCase;
+        bool ww = wholeWord ?? SearchWholeWord;
+        SearchMatchCase = mc;
+        SearchWholeWord = ww;
+
         if (string.IsNullOrWhiteSpace(query))
         {
             _searchMatches = [];
@@ -748,7 +875,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
             for (int p = 0; p < PageCount; p++)
             {
                 ct.ThrowIfCancellationRequested();
-                var rects = _document.SearchPage(p, query, matchCase, wholeWord);
+                var rects = _document.SearchPage(p, query, mc, ww);
                 foreach (var r in rects)
                 {
                     list.Add(new SearchMatch(p, r));
@@ -804,5 +931,6 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         History.Dispose();
         _document.Dispose();
+        RenderGate.Dispose();
     }
 }

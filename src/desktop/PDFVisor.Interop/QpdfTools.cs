@@ -77,7 +77,7 @@ public static class QpdfTools
                 string name = n.NameUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(n.NameUtf8) ?? "" : "";
                 string type = n.FieldTypeUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(n.FieldTypeUtf8) ?? "" : "";
                 string val = n.ValueUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(n.ValueUtf8) ?? "" : "";
-                result.Add(new PdfFormField(name, type, val, n.IsChecked != 0));
+                result.Add(new PdfFormField(name, type, val, n.IsChecked != 0, n.PageIndex, n.Rect));
             }
             return result;
         }
@@ -128,6 +128,44 @@ public static class QpdfTools
             fieldName,
             ref rect,
             defaultValue);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
+    public static void SetFormFieldRect(
+        string sourcePath,
+        string destinationPath,
+        string fieldName,
+        PvRect newRect,
+        string? sourcePassword = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fieldName);
+
+        var status = NativeMethods.pv_qpdf_set_form_field_rect(
+            sourcePath,
+            sourcePassword,
+            destinationPath,
+            fieldName,
+            ref newRect);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
+    public static void RemoveFormField(
+        string sourcePath,
+        string destinationPath,
+        string fieldName,
+        string? sourcePassword = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fieldName);
+
+        var status = NativeMethods.pv_qpdf_remove_form_field(
+            sourcePath,
+            sourcePassword,
+            destinationPath,
+            fieldName);
         PdfEngine.ThrowIfFailed(status);
     }
 

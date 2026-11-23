@@ -387,9 +387,11 @@
                                         Margin="10,2,10,8"/>
                                 <ListBox x:Name="FormFieldList"
                                          MouseDoubleClick="FormFieldList_MouseDoubleClick"
+                                         KeyDown="FormFieldList_KeyDown"
                                          BorderThickness="0"
                                          Background="Transparent"
-                                         Padding="6">
+                                         Padding="6"
+                                         ToolTip="Doble clic para editar valor • Arrastra en la página para mover • Supr para eliminar">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
                                             <StackPanel Margin="6,4">
@@ -429,10 +431,11 @@
                             <ListBox x:Name="PageObjectList"
                                      Visibility="Collapsed"
                                      MouseDoubleClick="PageObjectList_MouseDoubleClick"
+                                     KeyDown="PageObjectList_KeyDown"
                                      BorderThickness="0"
                                      Background="Transparent"
                                      Padding="6"
-                                     ToolTip="Doble clic en un texto para editarlo">
+                                     ToolTip="Doble clic en un texto para editarlo • Supr para eliminar objeto">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding DisplayLabel}" TextTrimming="CharacterEllipsis" Margin="4,4" FontSize="12"/>
@@ -477,11 +480,31 @@
                         </Border.Effect>
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                             <TextBox x:Name="TxtSearch"
-                                     Width="210"
+                                     Width="200"
                                      Height="26"
                                      Padding="6,2"
                                      VerticalContentAlignment="Center"
                                      KeyDown="TxtSearch_KeyDown"/>
+                            <ToggleButton x:Name="BtnSearchMatchCase"
+                                          Style="{StaticResource ToolToggleButton}"
+                                          Content="Aa"
+                                          FontFamily="Segoe UI"
+                                          FontSize="11.5"
+                                          FontWeight="SemiBold"
+                                          Width="26" Height="26"
+                                          Margin="4,0,0,0"
+                                          Click="BtnSearchOption_Click"
+                                          ToolTip="Coincidir mayúsculas y minúsculas"/>
+                            <ToggleButton x:Name="BtnSearchWholeWord"
+                                          Style="{StaticResource ToolToggleButton}"
+                                          Content="ab|"
+                                          FontFamily="Segoe UI"
+                                          FontSize="11"
+                                          FontWeight="SemiBold"
+                                          Width="28" Height="26"
+                                          Margin="2,0,0,0"
+                                          Click="BtnSearchOption_Click"
+                                          ToolTip="Solo palabras completas"/>
                             <TextBlock x:Name="TxtSearchStatus"
                                        Text=""
                                        MinWidth="56"

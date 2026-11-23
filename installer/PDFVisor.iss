@@ -1,6 +1,6 @@
 ; Inno Setup 6 script for PDFVisor (Windows x64)
 #ifndef MyAppVersion
-  #define MyAppVersion "0.8.0"
+  #define MyAppVersion "1.3.0"
 #endif
 
 [Setup]

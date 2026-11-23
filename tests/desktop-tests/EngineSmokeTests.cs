@@ -252,6 +252,17 @@ public sealed class EngineSmokeTests : IDisposable
             Assert.Single(session.FormFields);
             Assert.Equal("ClientName", session.FormFields[0].Name);
             Assert.Equal("Initial", session.FormFields[0].Value);
+            Assert.Equal(0, session.FormFields[0].PageIndex);
+            Assert.InRange(session.FormFields[0].Rect.Left, 71.0, 73.0);
+
+            // Move & resize the text field and verify Undo/Redo restores original coordinates!
+            session.MoveOrResizeFormField("ClientName", new PvRect { Left = 180, Bottom = 500, Right = 460, Top = 540 });
+            Assert.InRange(session.FormFields[0].Rect.Left, 179.0, 181.0);
+            Assert.InRange(session.FormFields[0].Rect.Bottom, 499.0, 501.0);
+            session.Undo();
+            Assert.InRange(session.FormFields[0].Rect.Left, 71.0, 73.0);
+            session.Redo();
+            Assert.InRange(session.FormFields[0].Rect.Left, 179.0, 181.0);
 
             session.SetFormFieldValue("ClientName", "Carlos Pro User");
             Assert.Single(session.FormFields);
@@ -611,14 +622,24 @@ public sealed class EngineSmokeTests : IDisposable
                 Assert.Contains("Page 2 of 2", session.Document.ExtractPageText(1));
                 session.Save();
 
-                // 3. Metadata round-trip
+                // 3. Metadata round-trip + Undo/Redo + disk non-overwrite before Save()
                 session.UpdateMetadata("Contrato Marco", "Carlos", "Legal", "pdf,contrato");
+                Assert.True(session.IsModified);
+                var origDiskMeta = QpdfTools.GetMetadata(docA);
+                Assert.Equal(string.Empty, origDiskMeta.Title); // Disk file untouched before Save()!
+
                 var meta = session.GetMetadata();
                 Assert.Equal("Contrato Marco", meta.Title);
                 Assert.Equal("Carlos", meta.Author);
                 Assert.Equal("Legal", meta.Subject);
                 Assert.Equal("pdf,contrato", meta.Keywords);
                 Assert.False(string.IsNullOrWhiteSpace(meta.PdfVersion));
+
+                session.Undo();
+                Assert.Equal(string.Empty, session.GetMetadata().Title);
+                session.Redo();
+                Assert.Equal("Contrato Marco", session.GetMetadata().Title);
+                session.Save();
             }
 
             // 4. PdfDiffService (docA modified vs docB)
@@ -633,6 +654,103 @@ public sealed class EngineSmokeTests : IDisposable
         {
             if (Directory.Exists(splitDir)) try { Directory.Delete(splitDir, recursive: true); } catch { }
         }
+    }
+
+    [Fact]
+    public void V13_IncrementalMultiSignature_PfxLoad_UnicodePaths_UndoRedo_And_LcsVisualDiff()
+    {
+        // 1. Unicode file paths (tildes, ñ, spaces) across PDFium + QPDF + PAdES
+        string unicodePath = Path.Combine(Path.GetTempPath(), $"pdfvisor_español_año_{Guid.NewGuid():N}.pdf");
+        string sig1Path = Path.Combine(Path.GetTempPath(), $"pdfvisor_firma1_muñoz_{Guid.NewGuid():N}.pdf");
+        string sig2Path = Path.Combine(Path.GetTempPath(), $"pdfvisor_firma2_co_firmado_{Guid.NewGuid():N}.pdf");
+        string pfxPath = Path.Combine(Path.GetTempPath(), $"pdfvisor_cert_{Guid.NewGuid():N}.pfx");
+        _tempFiles.Add(unicodePath);
+        _tempFiles.Add(sig1Path);
+        _tempFiles.Add(sig2Path);
+        _tempFiles.Add(pfxPath);
+
+        File.WriteAllBytes(unicodePath, BuildMinimalValidPdf("Documento Base"));
+
+        // 2. Undo/Redo on Unicode text, Watermarks, Page Numbers, and Batch OCR
+        using (var session = new DocumentSession(PdfDocument.Open(unicodePath)))
+        {
+            session.AddTextObject("Cláusula Crítica: 500€", 72, 650, fontSize: 13f);
+            Assert.Contains("Cláusula", session.Document.ExtractPageText(0));
+            session.Undo();
+            Assert.DoesNotContain("Cláusula", session.Document.ExtractPageText(0));
+            session.Redo();
+            Assert.Contains("Cláusula", session.Document.ExtractPageText(0));
+
+            session.ApplyWatermarkToAllPages("BORRADOR AÑO 2026");
+            Assert.Contains("BORRADOR", session.Document.ExtractPageText(0));
+            session.Undo();
+            Assert.DoesNotContain("BORRADOR", session.Document.ExtractPageText(0));
+
+            int ocrAdded = session.AddInvisibleOcrWordsBatch(0,
+            [
+                new PdfOcrWord("FACTURA_OCR_01", 72, 400, 12f),
+                new PdfOcrWord("ESPAÑA_2026", 180, 400, 12f)
+            ]);
+            Assert.Equal(2, ocrAdded);
+            Assert.Contains("FACTURA_OCR_01", session.Document.ExtractPageText(0));
+            Assert.Contains("ESPAÑA_2026", session.Document.ExtractPageText(0));
+            session.Undo();
+            Assert.DoesNotContain("FACTURA_OCR_01", session.Document.ExtractPageText(0));
+
+            session.Save();
+        }
+
+        // 3. PKCS#12 (.pfx) loading + Incremental Multi-Signature (Signer A then Signer B without breaking Signer A!)
+        using var rsaA = RSA.Create(2048);
+        var reqA = new CertificateRequest("CN=Carlos Gutiérrez (Firmante A)", rsaA, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var certA = reqA.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+        File.WriteAllBytes(pfxPath, certA.Export(X509ContentType.Pfx, "ClaveSegura123!"));
+
+        using var loadedPfxCert = PadesSignatureService.LoadCertificateFromPfx(pfxPath, "ClaveSegura123!");
+
+        using (var s1 = new DocumentSession(PdfDocument.Open(unicodePath)))
+        {
+            s1.SignPadesAndExport(sig1Path, loadedPfxCert, reason: "Aprobación técnica — Diseño", location: "Madrid");
+        }
+
+        using var rsaB = RSA.Create(2048);
+        var reqB = new CertificateRequest("CN=María Muñoz (Firmante B)", rsaB, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var certB = reqB.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+
+        using (var s2 = new DocumentSession(PdfDocument.Open(sig1Path)))
+        {
+            Assert.Single(s2.Signatures);
+            Assert.True(s2.Signatures[0].IsCryptographicallyValid);
+            s2.SignPadesAndExport(sig2Path, certB, reason: "Conformidad legal", location: "Barcelona");
+        }
+
+        using (var coSigned = PdfDocument.Open(sig2Path))
+        {
+            var sigs = PadesSignatureService.VerifySignatures(coSigned);
+            Assert.Equal(2, sigs.Count);
+            // Both Signature 1 (incremental revision 1) and Signature 2 (whole document) must remain cryptographically valid!
+            Assert.True(sigs[0].IsCryptographicallyValid, sigs[0].StatusSummary);
+            Assert.False(sigs[0].CoversWholeDocument);
+            Assert.Contains("Carlos Gutiérrez", sigs[0].SignerName);
+
+            Assert.True(sigs[1].IsCryptographicallyValid, sigs[1].StatusSummary);
+            Assert.True(sigs[1].CoversWholeDocument);
+            Assert.Contains("María Muñoz", sigs[1].SignerName);
+
+            // Visual Pixel Diff between 1-sig PDF and 2-sig PDF must detect the 2nd visible signature stamp!
+            using var docSig1 = PdfDocument.Open(sig1Path);
+            var (diffPixels, dw, dh, changedRatio) = PdfDiffService.RenderVisualDiffBgra(docSig1, coSigned, 0, widthPx: 500);
+            Assert.Equal(dw * dh * 4, diffPixels.Length);
+            Assert.True(changedRatio > 0.001, "Expected visual pixel diff to detect the second visible signature stamp.");
+        }
+
+        // 4. LCS Diff detects reordered & duplicate lines (which HashSet missed)
+        var reorderedDiff = PdfDiffService.ComputeLcsDiff(["Línea A", "Línea B"], ["Línea B", "Línea A"]);
+        Assert.Contains(reorderedDiff, d => d.Kind == DiffLineKind.Removed);
+        Assert.Contains(reorderedDiff, d => d.Kind == DiffLineKind.Added);
+
+        var dupDiff = PdfDiffService.ComputeLcsDiff(["Repetida"], ["Repetida", "Repetida"]);
+        Assert.Single(dupDiff, d => d.Kind == DiffLineKind.Added);
     }
 
     private static byte[] BuildMinimalValidPdf(string text)

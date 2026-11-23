@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using Windows.Graphics.Imaging;
 using Windows.Media.Ocr;
@@ -16,16 +17,18 @@ public interface IOcrBackend
 }
 
 /// <summary>
-/// Built-in offline Windows WinRT OCR backend (zero external model downloads).
+/// Built-in offline Windows WinRT OCR backend (zero external model downloads), caching OcrEngine across batch pages.
 /// </summary>
 public sealed class WindowsOcrBackend : IOcrBackend
 {
+    private readonly Lazy<OcrEngine?> _engine = new(OcrEngine.TryCreateFromUserProfileLanguages);
+
     public string Name => "Windows.Media.Ocr (Offline)";
-    public bool IsAvailable => OcrEngine.TryCreateFromUserProfileLanguages() is not null;
+    public bool IsAvailable => _engine.Value is not null;
 
     public async Task<OcrPageResult> RecognizePngAsync(string pngPath)
     {
-        var engine = OcrEngine.TryCreateFromUserProfileLanguages()
+        var engine = _engine.Value
                      ?? throw new InvalidOperationException("No Windows OCR language packs are installed.");
 
         byte[] bytes = await File.ReadAllBytesAsync(pngPath);
@@ -56,7 +59,7 @@ public sealed class WindowsOcrBackend : IOcrBackend
 
 /// <summary>
 /// ONNX Runtime + DirectML (RapidOCR / PaddleOCR) backend scaffold.
-/// Activates automatically when models/ocr/det.onnx, rec.onnx, and dict.txt are present.
+/// Reports IsAvailable = false until an ONNX inference session is wired, ensuring safe automatic fallback to WindowsOcrBackend.
 /// </summary>
 public sealed class OnnxDirectMlOcrBackend : IOcrBackend
 {
@@ -69,14 +72,18 @@ public sealed class OnnxDirectMlOcrBackend : IOcrBackend
         _modelsDir = modelsDir ?? Path.Combine(AppContext.BaseDirectory, "models", "ocr");
     }
 
-    public bool IsAvailable =>
+    public bool HasModelFiles =>
         File.Exists(Path.Combine(_modelsDir, "det.onnx")) &&
         File.Exists(Path.Combine(_modelsDir, "rec.onnx")) &&
         File.Exists(Path.Combine(_modelsDir, "dict.txt"));
 
+    public bool IsRuntimeWired => false;
+
+    public bool IsAvailable => IsRuntimeWired && HasModelFiles;
+
     public Task<OcrPageResult> RecognizePngAsync(string pngPath)
     {
-        if (!IsAvailable)
+        if (!HasModelFiles)
         {
             throw new FileNotFoundException(
                 $"ONNX OCR models not found in '{_modelsDir}'. Place det.onnx, rec.onnx and dict.txt or use --backend windows.");
@@ -89,7 +96,11 @@ internal static class Program
 {
     private static async Task<int> Main(string[] args)
     {
+        Console.InputEncoding = Encoding.UTF8;
+        Console.OutputEncoding = Encoding.UTF8;
+
         string backendMode = "auto";
+        bool stdinLoop = false;
         string? imagePath = null;
 
         for (int i = 0; i < args.Length; i++)
@@ -98,30 +109,66 @@ internal static class Program
             {
                 backendMode = args[++i].ToLowerInvariant();
             }
+            else if (args[i] == "--stdin-loop")
+            {
+                stdinLoop = true;
+            }
             else if (imagePath is null)
             {
                 imagePath = args[i];
             }
         }
 
+        var onnx = new OnnxDirectMlOcrBackend();
+        var win = new WindowsOcrBackend();
+
+        async Task<OcrPageResult> RunWithFallbackAsync(string path)
+        {
+            if (backendMode == "onnx")
+                return await onnx.RecognizePngAsync(path);
+            if (backendMode == "windows")
+                return await win.RecognizePngAsync(path);
+
+            if (onnx.IsAvailable)
+            {
+                try { return await onnx.RecognizePngAsync(path); }
+                catch (NotSupportedException) { /* fallback to Windows OCR */ }
+            }
+            return await win.RecognizePngAsync(path);
+        }
+
+        // Persistent batch worker mode: processes multiple pages over stdin/stdout without process startup overhead
+        if (stdinLoop)
+        {
+            while (await Console.In.ReadLineAsync() is string line)
+            {
+                string trimmed = line.Trim();
+                if (string.IsNullOrEmpty(trimmed) || string.Equals(trimmed, "EXIT", StringComparison.OrdinalIgnoreCase))
+                    break;
+
+                try
+                {
+                    var res = await RunWithFallbackAsync(trimmed);
+                    Console.WriteLine(JsonSerializer.Serialize(res));
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine(JsonSerializer.Serialize(new { Error = ex.Message }));
+                }
+                await Console.Out.FlushAsync();
+            }
+            return 0;
+        }
+
         if (string.IsNullOrWhiteSpace(imagePath) || !File.Exists(imagePath))
         {
-            Console.Error.WriteLine("Usage: PDFVisor.OcrWorker [--backend auto|windows|onnx] <image.png>");
+            Console.Error.WriteLine("Usage: PDFVisor.OcrWorker [--backend auto|windows|onnx] [--stdin-loop | <image.png>]");
             return 2;
         }
 
         try
         {
-            IOcrBackend onnx = new OnnxDirectMlOcrBackend();
-            IOcrBackend win = new WindowsOcrBackend();
-            IOcrBackend selected = backendMode switch
-            {
-                "onnx" => onnx,
-                "windows" => win,
-                _ => onnx.IsAvailable ? onnx : win
-            };
-
-            var result = await selected.RecognizePngAsync(imagePath);
+            var result = await RunWithFallbackAsync(imagePath);
             Console.WriteLine(JsonSerializer.Serialize(result));
             return 0;
         }

@@ -24,14 +24,22 @@ public sealed class PdfDocument : IDisposable
 {
     private PdfDocumentSafeHandle _handle;
     private readonly string? _password;
+    private string? _activePassword;
+    private string? _workingCopyPath;
 
     public string FilePath { get; private set; }
+    /// <summary>
+    /// Current backing PDF path on disk (session working copy if structurally modified via QPDF, otherwise FilePath).
+    /// </summary>
+    public string ActiveSourcePath => _workingCopyPath ?? FilePath;
+    public string? ActivePassword => _workingCopyPath is not null ? _activePassword : _password;
     public int PageCount => _handle.IsClosed ? 0 : NativeMethods.pv_doc_get_page_count(_handle.DangerousGetHandle());
 
     private PdfDocument(string filePath, string? password, PdfDocumentSafeHandle handle)
     {
         FilePath = filePath;
         _password = password;
+        _activePassword = password;
         _handle = handle;
     }
 
@@ -208,11 +216,28 @@ public sealed class PdfDocument : IDisposable
             PdfEngine.ThrowIfFailed(saveStatus);
 
             _handle.Dispose();
+            CleanupWorkingCopy();
+
+            if (!string.IsNullOrWhiteSpace(_password))
+            {
+                string encTmp = tmpPath + ".enc";
+                try
+                {
+                    QpdfTools.EncryptAes256(tmpPath, encTmp, _password, _password, allowPrint: true, allowModify: true, allowExtract: true);
+                    File.Move(encTmp, tmpPath, overwrite: true);
+                }
+                finally
+                {
+                    if (File.Exists(encTmp)) try { File.Delete(encTmp); } catch { }
+                }
+            }
+
             File.Move(tmpPath, FilePath, overwrite: true);
 
             var openStatus = NativeMethods.pv_doc_open(FilePath, _password, out var newRawHandle);
             PdfEngine.ThrowIfFailed(openStatus);
             _handle = new PdfDocumentSafeHandle(newRawHandle);
+            _activePassword = _password;
         }
         catch
         {
@@ -426,14 +451,58 @@ public sealed class PdfDocument : IDisposable
         }
     }
 
+    /// <summary>
+    /// Loads a modified PDF into a session-isolated working copy WITHOUT overwriting the user's original FilePath on disk.
+    /// </summary>
+    public void LoadWorkingCopy(string sourcePdfPath, string? workingPassword = null)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePdfPath);
+
+        string newWork = Path.Combine(Path.GetTempPath(), $"pdfvisor_work_{Guid.NewGuid():N}.pdf");
+        File.Copy(sourcePdfPath, newWork, overwrite: true);
+
+        var openStatus = NativeMethods.pv_doc_open(newWork, workingPassword, out var newRawHandle);
+        if (openStatus == PvStatus.PasswordRequired && workingPassword is null && _password is not null)
+        {
+            openStatus = NativeMethods.pv_doc_open(newWork, _password, out newRawHandle);
+            workingPassword = _password;
+        }
+        if (openStatus != PvStatus.Ok)
+        {
+            try { File.Delete(newWork); } catch { }
+            PdfEngine.ThrowIfFailed(openStatus);
+        }
+
+        _handle.Dispose();
+        CleanupWorkingCopy();
+        _workingCopyPath = newWork;
+        _activePassword = workingPassword;
+        _handle = new PdfDocumentSafeHandle(newRawHandle);
+    }
+
     public void ReplaceFileAndReload(string replacementPdfPath)
     {
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
         _handle.Dispose();
+        CleanupWorkingCopy();
         File.Copy(replacementPdfPath, FilePath, overwrite: true);
         var openStatus = NativeMethods.pv_doc_open(FilePath, _password, out var newRawHandle);
         PdfEngine.ThrowIfFailed(openStatus);
         _handle = new PdfDocumentSafeHandle(newRawHandle);
+        _activePassword = _password;
+    }
+
+    private void CleanupWorkingCopy()
+    {
+        if (_workingCopyPath is not null)
+        {
+            if (File.Exists(_workingCopyPath))
+            {
+                try { File.Delete(_workingCopyPath); } catch { }
+            }
+            _workingCopyPath = null;
+        }
     }
 
     public string? Password => _password;
@@ -533,6 +602,76 @@ public sealed class PdfDocument : IDisposable
         return idx;
     }
 
+    public (int FirstObjIndex, int AddedCount) AddInvisibleOcrTextBatch(
+        int pageIndex,
+        IReadOnlyList<PdfOcrWord> words,
+        string? ttfFontPath = null)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        if (words is null || words.Count == 0) return (-1, 0);
+
+        var ptrs = new List<nint>(words.Count);
+        var nativeWords = new PvOcrWordNative[words.Count];
+        try
+        {
+            for (int i = 0; i < words.Count; i++)
+            {
+                nint strPtr = Marshal.StringToCoTaskMemUTF8(words[i].Text ?? string.Empty);
+                ptrs.Add(strPtr);
+                nativeWords[i] = new PvOcrWordNative
+                {
+                    Utf8Text = strPtr,
+                    XPt = words[i].XPt,
+                    YPt = words[i].YPt,
+                    FontSize = words[i].FontSize
+                };
+            }
+
+            unsafe
+            {
+                fixed (PvOcrWordNative* pWords = nativeWords)
+                {
+                    var status = NativeMethods.pv_page_add_invisible_text_batch(
+                        _handle.DangerousGetHandle(),
+                        pageIndex,
+                        pWords,
+                        nativeWords.Length,
+                        ttfFontPath,
+                        out int firstIdx,
+                        out int addedCount);
+                    PdfEngine.ThrowIfFailed(status);
+                    return (firstIdx, addedCount);
+                }
+            }
+        }
+        finally
+        {
+            foreach (var p in ptrs)
+            {
+                if (p != nint.Zero) Marshal.FreeCoTaskMem(p);
+            }
+        }
+    }
+
+    public PdfLinkTarget GetLinkAtPoint(int pageIndex, double xPt, double yPt)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_page_get_link_at_point(
+            _handle.DangerousGetHandle(), pageIndex, xPt, yPt, out var nativeLink);
+        PdfEngine.ThrowIfFailed(status);
+        if (nativeLink.Found == 0)
+            return new PdfLinkTarget(false, null, null);
+
+        string? uri = null;
+        if (nativeLink.UriUtf8 != nint.Zero)
+        {
+            try { uri = Marshal.PtrToStringUTF8(nativeLink.UriUtf8); }
+            finally { NativeMethods.pv_free_string(nativeLink.UriUtf8); }
+        }
+        int? destPage = nativeLink.DestPageIndex >= 0 ? nativeLink.DestPageIndex : null;
+        return new PdfLinkTarget(true, destPage, uri);
+    }
+
     public int GetCharIndexAtPos(int pageIndex, double xPt, double yPt, double tolerancePt = 10.0)
     {
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
@@ -604,8 +743,19 @@ public sealed class PdfDocument : IDisposable
         PdfEngine.ThrowIfFailed(status);
     }
 
+    public int AddRotatedUnicodeText(int pageIndex, string text, string? ttfFontPath, float fontSize, double xPt, double yPt, double angleDegrees, uint rgba)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        ArgumentException.ThrowIfNullOrEmpty(text);
+        var status = NativeMethods.pv_page_add_rotated_unicode_text(
+            _handle.DangerousGetHandle(), pageIndex, text, ttfFontPath, fontSize, xPt, yPt, angleDegrees, rgba, out int idx);
+        PdfEngine.ThrowIfFailed(status);
+        return idx;
+    }
+
     public void Dispose()
     {
         _handle.Dispose();
+        CleanupWorkingCopy();
     }
 }
