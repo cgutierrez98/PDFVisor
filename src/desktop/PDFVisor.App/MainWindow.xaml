@@ -1,0 +1,247 @@
+<Window x:Class="PDFVisor.App.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:viewport="clr-namespace:PDFVisor.Viewport;assembly=PDFVisor.Viewport"
+        Title="PDFVisor — Visor y Editor PDF Profesional"
+        Height="880" Width="1440"
+        MinHeight="560" MinWidth="960"
+        AllowDrop="True"
+        Drop="Window_Drop"
+        DragOver="Window_DragOver"
+        KeyDown="Window_KeyDown"
+        WindowStartupLocation="CenterScreen">
+    <DockPanel LastChildFill="True">
+        <!-- Top Command Bar -->
+        <Border DockPanel.Dock="Top" BorderThickness="0,0,0,1" Padding="10,6">
+            <StackPanel Orientation="Vertical">
+                <DockPanel LastChildFill="False">
+                    <WrapPanel DockPanel.Dock="Left" VerticalAlignment="Center" Orientation="Horizontal">
+                        <Button x:Name="BtnOpen" Content="Abrir" Click="BtnOpen_Click" Padding="10,5" Margin="0,0,4,0" ToolTip="Abrir PDF (Ctrl+O)"/>
+                        <Button x:Name="BtnSave" Content="Guardar" Click="BtnSave_Click" Padding="10,5" Margin="2,0" ToolTip="Guardar cambios (Ctrl+S)"/>
+                        <Button x:Name="BtnSaveAs" Content="Guardar como..." Click="BtnSaveAs_Click" Padding="10,5" Margin="2,0,4,0" ToolTip="Guardar copia (Ctrl+Shift+S)"/>
+                        <Button x:Name="BtnPrint" Content="Imprimir" Click="BtnPrint_Click" Padding="10,5" Margin="2,0,4,0" ToolTip="Imprimir documento (Ctrl+P)"/>
+                        <Button x:Name="BtnOptimize" Content="Optimizar (QPDF)" Click="BtnOptimize_Click" Padding="10,5" Margin="2,0" ToolTip="Comprimir y linealizar (Fast Web View) con QPDF"/>
+                        <Button x:Name="BtnEncrypt" Content="Cifrar AES-256" Click="BtnEncrypt_Click" Padding="10,5" Margin="2,0" ToolTip="Proteger PDF con contraseña AES-256"/>
+                        <Button x:Name="BtnSignPades" Content="Firmar (PAdES)" Click="BtnSignPades_Click" Padding="10,5" Margin="2,0,6,0" ToolTip="Firmar digitalmente con certificado de Windows (CNG)"/>
+                        <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="4,2"/>
+                        <Button x:Name="BtnUndo" Content="↶" Width="32" Click="BtnUndo_Click" Padding="6,5" Margin="2,0" ToolTip="Deshacer (Ctrl+Z)"/>
+                        <Button x:Name="BtnRedo" Content="↷" Width="32" Click="BtnRedo_Click" Padding="6,5" Margin="2,0,6,0" ToolTip="Rehacer (Ctrl+Y)"/>
+                        <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="4,2"/>
+                        <Button x:Name="BtnPrev" Content="◀" Width="30" Click="BtnPrev_Click" Padding="4,5" Margin="2,0" ToolTip="Página anterior (RePág)"/>
+                        <TextBlock x:Name="TxtPageIndicator" Text="0 / 0" VerticalAlignment="Center" Margin="6,0" FontWeight="SemiBold"/>
+                        <Button x:Name="BtnNext" Content="▶" Width="30" Click="BtnNext_Click" Padding="4,5" Margin="2,0,6,0" ToolTip="Página siguiente (AvPág)"/>
+                        <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="4,2"/>
+                        <Button x:Name="BtnZoomOut" Content="−" Width="30" Click="BtnZoomOut_Click" Padding="4,5" Margin="2,0" ToolTip="Alejar (Ctrl+-)"/>
+                        <TextBlock x:Name="TxtZoom" Text="100%" Width="48" TextAlignment="Center" VerticalAlignment="Center" FontWeight="SemiBold"/>
+                        <Button x:Name="BtnZoomIn" Content="+" Width="30" Click="BtnZoomIn_Click" Padding="4,5" Margin="2,0" ToolTip="Acercar (Ctrl++)"/>
+                        <Button x:Name="BtnFitWidth" Content="Ajustar" Click="BtnFitWidth_Click" Padding="8,5" Margin="4,0,2,0" ToolTip="Ajustar al ancho"/>
+                        <Button x:Name="BtnResetZoom" Content="100%" Click="BtnResetZoom_Click" Padding="8,5" Margin="2,0"/>
+                    </WrapPanel>
+
+                    <!-- Search Bar (Right) -->
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBox x:Name="TxtSearch"
+                                 Width="180"
+                                 Padding="6,4"
+                                 VerticalContentAlignment="Center"
+                                 KeyDown="TxtSearch_KeyDown"
+                                 ToolTip="Buscar texto (Ctrl+F)"/>
+                        <Button x:Name="BtnSearch" Content="Buscar" Click="BtnSearch_Click" Padding="8,5" Margin="4,0,2,0"/>
+                        <Button x:Name="BtnSearchPrev" Content="▲" Width="26" Click="BtnSearchPrev_Click" Padding="4,5" Margin="2,0" ToolTip="Coincidencia anterior"/>
+                        <Button x:Name="BtnSearchNext" Content="▼" Width="26" Click="BtnSearchNext_Click" Padding="4,5" Margin="2,0" ToolTip="Coincidencia siguiente"/>
+                        <TextBlock x:Name="TxtSearchStatus" Text="" VerticalAlignment="Center" Margin="6,0,0,0" MinWidth="64" Opacity="0.8"/>
+                    </StackPanel>
+                </DockPanel>
+
+                <!-- Secondary Toolbar: Page Organization & Annotations -->
+                <WrapPanel Margin="0,6,0,0" VerticalAlignment="Center" Orientation="Horizontal">
+                    <TextBlock Text="Páginas:" VerticalAlignment="Center" Margin="0,0,6,0" Opacity="0.75" FontSize="12"/>
+                    <Button x:Name="BtnRotatePage" Content="↻ Rotar" Click="BtnRotatePage_Click" Padding="8,4" Margin="2,0" ToolTip="Rotar página actual 90° (permanente)"/>
+                    <Button x:Name="BtnMoveUp" Content="↑" Width="28" Click="BtnMoveUp_Click" Padding="4,4" Margin="2,0" ToolTip="Mover página arriba"/>
+                    <Button x:Name="BtnMoveDown" Content="↓" Width="28" Click="BtnMoveDown_Click" Padding="4,4" Margin="2,0" ToolTip="Mover página abajo"/>
+                    <Button x:Name="BtnMergePdf" Content="Unir PDF..." Click="BtnMergePdf_Click" Padding="8,4" Margin="4,0,2,0" ToolTip="Importar páginas de otro PDF"/>
+                    <Button x:Name="BtnExtractPage" Content="Extraer..." Click="BtnExtractPage_Click" Padding="8,4" Margin="2,0" ToolTip="Extraer página actual a un nuevo PDF"/>
+                    <Button x:Name="BtnDeletePage" Content="Eliminar" Click="BtnDeletePage_Click" Padding="8,4" Margin="2,0,8,0" ToolTip="Eliminar página actual"/>
+                    <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="4,2"/>
+                    <TextBlock Text="Anotar:" VerticalAlignment="Center" Margin="6,0,6,0" Opacity="0.75" FontSize="12"/>
+                    <RadioButton x:Name="ToolSelect" Content="Cursor" GroupName="AnnotTools" IsChecked="True" Checked="Tool_Checked" Margin="4,0" VerticalAlignment="Center"/>
+                    <RadioButton x:Name="ToolHighlight" Content="Resaltar" GroupName="AnnotTools" Checked="Tool_Checked" Margin="6,0" VerticalAlignment="Center"/>
+                    <RadioButton x:Name="ToolSquare" Content="Rectángulo" GroupName="AnnotTools" Checked="Tool_Checked" Margin="6,0" VerticalAlignment="Center"/>
+                    <RadioButton x:Name="ToolNote" Content="Nota" GroupName="AnnotTools" Checked="Tool_Checked" Margin="6,0" VerticalAlignment="Center"/>
+                    <RadioButton x:Name="ToolInk" Content="Dibujo libre" GroupName="AnnotTools" Checked="Tool_Checked" Margin="6,0" VerticalAlignment="Center"/>
+                    <RadioButton x:Name="ToolAddText" Content="+ Texto" GroupName="AnnotTools" Checked="Tool_Checked" Margin="6,0" VerticalAlignment="Center"/>
+                    <RadioButton x:Name="ToolRedact" Content="Censurar" GroupName="AnnotTools" Checked="Tool_Checked" Margin="6,0" VerticalAlignment="Center" ToolTip="Redacción permanente (elimina texto e imágenes subyacentes)"/>
+                    <Button x:Name="BtnInsertImage" Content="+ Imagen..." Click="BtnInsertImage_Click" Padding="8,4" Margin="8,0,2,0" ToolTip="Insertar imagen PNG/JPG en la página actual"/>
+                    <Button x:Name="BtnSanitize" Content="Sanear PDF..." Click="BtnSanitize_Click" Padding="8,4" Margin="2,0" ToolTip="Eliminar metadatos XMP/Info e historial incremental con QPDF"/>
+                    <Button x:Name="BtnOcrPage" Content="OCR Página" Click="BtnOcrPage_Click" Padding="8,4" Margin="2,0" ToolTip="Reconocer texto (OCR) en la página actual"/>
+                    <Button x:Name="BtnOcrAll" Content="OCR Todo" Click="BtnOcrAll_Click" Padding="8,4" Margin="2,0,6,0" ToolTip="Ejecutar OCR por lotes en todas las páginas"/>
+                    <CheckBox x:Name="ChkDarkRead" Content="Lectura oscura" Checked="ChkDarkRead_Changed" Unchecked="ChkDarkRead_Changed" VerticalAlignment="Center" Margin="4,0"/>
+                </WrapPanel>
+            </StackPanel>
+        </Border>
+
+        <!-- Document Tabs Bar -->
+        <Border DockPanel.Dock="Top" BorderThickness="0,0,0,1" Padding="6,4,6,0">
+            <ListBox x:Name="DocumentTabs"
+                     SelectionChanged="DocumentTabs_SelectionChanged"
+                     BorderThickness="0"
+                     Background="Transparent"
+                     ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                     ScrollViewer.VerticalScrollBarVisibility="Disabled">
+                <ListBox.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <StackPanel Orientation="Horizontal"/>
+                    </ItemsPanelTemplate>
+                </ListBox.ItemsPanel>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Orientation="Horizontal" Margin="6,2">
+                            <TextBlock Text="{Binding DisplayTabTitle}" VerticalAlignment="Center" FontWeight="Medium"/>
+                            <Button Content="✕"
+                                    Tag="{Binding}"
+                                    Click="BtnCloseTab_Click"
+                                    Margin="8,0,0,0"
+                                    Padding="4,0"
+                                    FontSize="11"
+                                    BorderThickness="0"
+                                    Background="Transparent"
+                                    ToolTip="Cerrar pestaña (Ctrl+W)"/>
+                        </StackPanel>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Border>
+
+        <!-- Bottom Status Bar -->
+        <StatusBar DockPanel.Dock="Bottom" Padding="8,2">
+            <StatusBarItem>
+                <TextBlock x:Name="StatusFile" Text="Sin documento abierto — arrastra archivos .pdf o pulsa Abrir (Ctrl+O)"/>
+            </StatusBarItem>
+            <Separator/>
+            <StatusBarItem>
+                <TextBlock x:Name="StatusPageSize" Text=""/>
+            </StatusBarItem>
+            <StatusBarItem HorizontalAlignment="Right">
+                <TextBlock x:Name="StatusEngine" Text="Motor: PDFVisor.Engine"/>
+            </StatusBarItem>
+        </StatusBar>
+
+        <!-- Main Workspace: Left Sidebar (Thumbnails + Bookmarks) + Center Viewport -->
+        <Grid>
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="230" MinWidth="160"/>
+                <ColumnDefinition Width="4"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Left Sidebar -->
+            <TabControl Grid.Column="0" BorderThickness="0">
+                <TabItem Header="Miniaturas">
+                    <ListBox x:Name="PageList"
+                             SelectionChanged="PageList_SelectionChanged"
+                             BorderThickness="0"
+                             Padding="4"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Margin="6,6" HorizontalAlignment="Center">
+                                    <Border Background="White"
+                                            BorderBrush="#44888888"
+                                            BorderThickness="1"
+                                            Width="140"
+                                            MinHeight="160"
+                                            HorizontalAlignment="Center">
+                                        <Image Source="{Binding ThumbnailImage}" Stretch="Uniform"/>
+                                    </Border>
+                                    <TextBlock Text="{Binding DisplayNumber}"
+                                               HorizontalAlignment="Center"
+                                               Margin="0,4,0,0"
+                                               FontSize="12"
+                                               Opacity="0.85"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+
+                <TabItem Header="Marcadores">
+                    <ListBox x:Name="BookmarkList"
+                             SelectionChanged="BookmarkList_SelectionChanged"
+                             BorderThickness="0"
+                             Padding="4">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding DisplayIndent}"
+                                           TextTrimming="CharacterEllipsis"
+                                           Margin="4,3"/>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+
+                <TabItem Header="Formularios">
+                    <DockPanel>
+                        <Button x:Name="BtnAddTextField"
+                                DockPanel.Dock="Top"
+                                Content="+ Campo de texto"
+                                Click="BtnAddTextField_Click"
+                                Margin="6,6,6,4"
+                                Padding="8,4"/>
+                        <ListBox x:Name="FormFieldList"
+                                 MouseDoubleClick="FormFieldList_MouseDoubleClick"
+                                 BorderThickness="0"
+                                 Padding="4">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="4,4">
+                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding Value}" Opacity="0.8" FontSize="12" TextTrimming="CharacterEllipsis"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </DockPanel>
+                </TabItem>
+
+                <TabItem Header="Firmas">
+                    <ListBox x:Name="SignatureList"
+                             BorderThickness="0"
+                             Padding="4">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border BorderBrush="#33888888" BorderThickness="1" CornerRadius="4" Padding="6" Margin="4">
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding SignerName}" FontWeight="SemiBold"/>
+                                        <TextBlock Text="{Binding StatusSummary}" TextWrapping="Wrap" FontSize="11" Margin="0,2,0,0"/>
+                                        <TextBlock Text="{Binding SubFilter}" Opacity="0.7" FontSize="10" Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+
+                <TabItem Header="Objetos">
+                    <ListBox x:Name="PageObjectList"
+                             MouseDoubleClick="PageObjectList_MouseDoubleClick"
+                             BorderThickness="0"
+                             Padding="4"
+                             ToolTip="Doble clic en un objeto de texto para editarlo directamente">
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <TextBlock Text="{Binding DisplayLabel}"
+                                           TextTrimming="CharacterEllipsis"
+                                           Margin="4,3"/>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                </TabItem>
+            </TabControl>
+
+            <GridSplitter Grid.Column="1" HorizontalAlignment="Stretch" VerticalAlignment="Stretch"/>
+
+            <!-- Center Accelerated Viewport -->
+            <viewport:PdfPageViewport x:Name="PdfViewport" Grid.Column="2"/>
+        </Grid>
+    </DockPanel>
+</Window>

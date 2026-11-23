@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>PDFVisor</AssemblyName>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\PDFVisor.Core\PDFVisor.Core.csproj" />
+    <ProjectReference Include="..\PDFVisor.Interop\PDFVisor.Interop.csproj" />
+    <ProjectReference Include="..\PDFVisor.Viewport\PDFVisor.Viewport.csproj" />
+  </ItemGroup>
+</Project>
