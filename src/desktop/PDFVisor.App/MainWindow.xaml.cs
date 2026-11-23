@@ -42,6 +42,57 @@ public partial class MainWindow : Window
         UpdateUiState();
     }
 
+    protected override void OnClosing(CancelEventArgs e)
+    {
+        var dirtySessions = _workspace.OpenSessions.Where(s => s.IsModified).ToList();
+        foreach (var session in dirtySessions)
+        {
+            var answer = MessageBox.Show(
+                this,
+                $"¿Deseas guardar los cambios en \"{session.FileName}\" antes de salir?",
+                "Cambios sin guardar",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Warning);
+
+            if (answer == MessageBoxResult.Cancel)
+            {
+                e.Cancel = true;
+                return;
+            }
+            if (answer == MessageBoxResult.Yes)
+            {
+                try
+                {
+                    session.Save();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, $"No se pudo guardar \"{session.FileName}\":\n{ex.Message}", "Error al guardar",
+                        MessageBoxButton.OK, MessageBoxImage.Error);
+                    e.Cancel = true;
+                    return;
+                }
+            }
+        }
+        base.OnClosing(e);
+    }
+
+    public void ReceiveExternalFiles(IEnumerable<string> files)
+    {
+        if (WindowState == WindowState.Minimized)
+            WindowState = WindowState.Normal;
+        Activate();
+        Topmost = true;
+        Topmost = false;
+        Focus();
+
+        foreach (var file in files)
+        {
+            if (file.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                OpenFile(file);
+        }
+    }
+
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
@@ -375,6 +426,30 @@ public partial class MainWindow : Window
         ToolInk.IsChecked = tool == AnnotationTool.Ink;
         ToolAddText.IsChecked = tool == AnnotationTool.AddText;
         ToolRedact.IsChecked = tool == AnnotationTool.Redact;
+
+        bool showColorPicker = tool is AnnotationTool.Highlight or AnnotationTool.Square or AnnotationTool.Note or AnnotationTool.Ink or AnnotationTool.AddText;
+        ToolOptionsBar.Visibility = showColorPicker ? Visibility.Visible : Visibility.Collapsed;
+        CmbFontSize.Visibility = tool == AnnotationTool.AddText ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ColorSwatch_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null || sender is not Button { Tag: string hex }) return;
+        if (uint.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out uint rgba))
+        {
+            _boundSession.ActiveColorRgba = rgba;
+            StatusMessage.Text = "Color de herramienta actualizado";
+        }
+    }
+
+    private void CmbFontSize_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isUpdatingControls || _boundSession is null || CmbFontSize.SelectedItem is not ComboBoxItem item) return;
+        string? raw = item.Content?.ToString()?.Replace(" pt", "").Trim();
+        if (float.TryParse(raw, out float pt))
+        {
+            _boundSession.ActiveFontSize = pt;
+        }
     }
 
     // --- File & Tab Actions ---

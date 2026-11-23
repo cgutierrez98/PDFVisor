@@ -67,6 +67,8 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     private int _documentRevision;
     private bool _darkReadingMode;
     private AnnotationTool _activeTool = AnnotationTool.None;
+    private uint _activeColorRgba = 0xE53935FF;
+    private float _activeFontSize = 14f;
     private string _searchQuery = string.Empty;
     private List<SearchMatch> _searchMatches = [];
     private int _activeMatchIndex = -1;
@@ -156,6 +158,24 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         get => _darkReadingMode;
         set => SetProperty(ref _darkReadingMode, value);
+    }
+
+    /// <summary>
+    /// Active RGBA color (0xRRGGBBAA) used by annotation and text insertion tools.
+    /// </summary>
+    public uint ActiveColorRgba
+    {
+        get => _activeColorRgba;
+        set => SetProperty(ref _activeColorRgba, value);
+    }
+
+    /// <summary>
+    /// Active font size in PDF points used when inserting new text objects.
+    /// </summary>
+    public float ActiveFontSize
+    {
+        get => _activeFontSize;
+        set => SetProperty(ref _activeFontSize, Math.Clamp(value, 6f, 72f));
     }
 
     public string SearchQuery

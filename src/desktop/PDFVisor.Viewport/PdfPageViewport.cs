@@ -720,7 +720,7 @@ public sealed class PdfPageViewport : ContentControl
             if (!string.IsNullOrWhiteSpace(noteText))
             {
                 var pt = DipPointToPdfPoint(pos, visual.PageIndex, session);
-                session.AddNote(new PvRect { Left = pt.X, Bottom = pt.Y - 24, Right = pt.X + 24, Top = pt.Y }, noteText);
+                session.AddNote(new PvRect { Left = pt.X, Bottom = pt.Y - 24, Right = pt.X + 24, Top = pt.Y }, noteText, session.ActiveColorRgba);
             }
             e.Handled = true;
             return;
@@ -732,7 +732,7 @@ public sealed class PdfPageViewport : ContentControl
             if (!string.IsNullOrWhiteSpace(newText))
             {
                 var pt = DipPointToPdfPoint(pos, visual.PageIndex, session);
-                session.AddTextObject(newText, pt.X, pt.Y, "Helvetica", 14f);
+                session.AddTextObject(newText, pt.X, pt.Y, "Helvetica", session.ActiveFontSize, session.ActiveColorRgba);
             }
             e.Handled = true;
             return;
@@ -868,8 +868,12 @@ public sealed class PdfPageViewport : ContentControl
                     Top = Math.Max(p1.Y, p2.Y)
                 };
 
-                if (Session.ActiveTool == AnnotationTool.Highlight) Session.AddHighlight(pdfRect);
-                else if (Session.ActiveTool == AnnotationTool.Square) Session.AddSquare(pdfRect);
+                if (Session.ActiveTool == AnnotationTool.Highlight)
+                {
+                    uint hlColor = (Session.ActiveColorRgba & 0xFFFFFF00u) | 0x80u; // semi-transparent highlight
+                    Session.AddHighlight(pdfRect, hlColor);
+                }
+                else if (Session.ActiveTool == AnnotationTool.Square) Session.AddSquare(pdfRect, Session.ActiveColorRgba);
                 else if (Session.ActiveTool == AnnotationTool.Redact) Session.ApplyPermanentRedaction(pdfRect);
             }
         }
@@ -881,7 +885,7 @@ public sealed class PdfPageViewport : ContentControl
             if (_inkPointsDip.Count >= 2)
             {
                 var pdfPts = _inkPointsDip.Select(p => DipPointToPdfPoint(p, visual.PageIndex, Session)).ToArray();
-                Session.AddInk(pdfPts);
+                Session.AddInk(pdfPts, Session.ActiveColorRgba);
             }
             _inkPointsDip.Clear();
         }
