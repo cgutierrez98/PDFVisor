@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/desktop/">
+    <Project Path="src/desktop/PDFVisor.Interop/PDFVisor.Interop.csproj" />
+    <Project Path="src/desktop/PDFVisor.Core/PDFVisor.Core.csproj" />
+    <Project Path="src/desktop/PDFVisor.Viewport/PDFVisor.Viewport.csproj" />
+    <Project Path="src/desktop/PDFVisor.App/PDFVisor.App.csproj" />
+  </Folder>
+  <Folder Name="/workers/">
+    <Project Path="src/workers/PDFVisor.OcrWorker/PDFVisor.OcrWorker.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/desktop-tests/PDFVisor.Tests.csproj" />
+  </Folder>
+</Solution>

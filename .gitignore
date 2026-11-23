@@ -1,0 +1,24 @@
+# Build outputs
+build/
+dist/
+out/
+bin/
+obj/
+*.user
+*.suo
+*.cache
+.vs/
+.vscode/
+
+# Downloaded third-party binaries
+third_party/pdfium/
+third_party/qpdf/
+third_party/*.tgz
+third_party/*.zip
+
+# NuGet / CMake
+packages/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+*.sln.iml
