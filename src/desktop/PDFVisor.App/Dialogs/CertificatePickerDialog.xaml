@@ -1,0 +1,48 @@
+<Window x:Class="PDFVisor.App.Dialogs.CertificatePickerDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Firmar documento digitalmente"
+        Width="520"
+        Height="400"
+        MinWidth="460"
+        MinHeight="340"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+    <DockPanel Margin="20">
+        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,10">
+            <TextBlock Text="Selecciona un certificado digital" FontSize="15" FontWeight="SemiBold"/>
+            <TextBlock Text="Certificados con clave privada disponibles en el almacén de Windows"
+                       Opacity="0.7" FontSize="12" Margin="0,2,0,0"/>
+        </StackPanel>
+
+        <StackPanel DockPanel.Dock="Bottom" Margin="0,12,0,0">
+            <TextBlock Text="Motivo de la firma:" FontSize="12" Margin="0,0,0,4"/>
+            <TextBox x:Name="TxtReason" Text="Aprobado y firmado digitalmente" Padding="8,5" Margin="0,0,0,8"/>
+
+            <TextBlock Text="Servidor de sellado de tiempo (TSA RFC 3161, opcional):" FontSize="12" Margin="0,0,0,4"/>
+            <TextBox x:Name="TxtTsaUrl" Padding="8,5" Margin="0,0,0,14"/>
+
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="Firmar documento"
+                        IsDefault="True"
+                        Click="BtnSign_Click"
+                        Style="{StaticResource PrimaryAccentButton}"
+                        Padding="18,6"
+                        FontSize="13"
+                        Margin="0,0,8,0"/>
+                <Button Content="Cancelar" IsCancel="True" Padding="18,6"/>
+            </StackPanel>
+        </StackPanel>
+
+        <ListBox x:Name="CertList" Padding="4">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <StackPanel Margin="6,4">
+                        <TextBlock Text="{Binding DisplayName}" FontWeight="SemiBold" FontSize="13"/>
+                        <TextBlock Text="{Binding Details}" Opacity="0.72" FontSize="11" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+    </DockPanel>
+</Window>

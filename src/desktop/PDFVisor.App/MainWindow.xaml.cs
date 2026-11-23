@@ -1,10 +1,12 @@
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Microsoft.Win32;
+using PDFVisor.App.Dialogs;
 using PDFVisor.Core;
 using PDFVisor.Interop;
 
@@ -15,15 +17,18 @@ public partial class MainWindow : Window
     private readonly WorkspaceViewModel _workspace = new();
     private DocumentSession? _boundSession;
     private CancellationTokenSource? _thumbCts;
+    private bool _isUpdatingControls;
+    private bool _isSidebarOpen = true;
 
     public MainWindow()
     {
         InitializeComponent();
         DocumentTabs.ItemsSource = _workspace.OpenSessions;
         _workspace.PropertyChanged += Workspace_PropertyChanged;
-        PdfViewport.PromptNoteText = () => PromptInput("Añadir nota adhesiva", "Texto de la nota:");
-        PdfViewport.PromptAddText = () => PromptInput("Insertar texto en el PDF", "Contenido del texto:");
-        StatusEngine.Text = $"Motor: PDFVisor.Engine {PdfEngine.Version} (PDFium + QPDF)";
+        PdfViewport.PromptNoteText = () => PromptInput("Añadir nota adhesiva", "Escribe el texto de la nota:");
+        PdfViewport.PromptAddText = () => PromptInput("Insertar texto", "Escribe el texto que deseas añadir a la página:");
+
+        RefreshRecentFilesUi();
         Loaded += (_, _) =>
         {
             foreach (var file in App.StartupFiles)
@@ -41,6 +46,13 @@ public partial class MainWindow : Window
         _thumbCts?.Cancel();
         _thumbCts?.Dispose();
         _workspace.Dispose();
+    }
+
+    private void RefreshRecentFilesUi()
+    {
+        var recents = RecentFilesService.Load();
+        RecentFilesList.ItemsSource = recents;
+        RecentFilesSection.Visibility = recents.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void Workspace_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -73,6 +85,7 @@ public partial class MainWindow : Window
             PageObjectList.ItemsSource = session.CurrentPageObjects;
             DocumentTabs.SelectedItem = session;
             TxtSearch.Text = session.SearchQuery;
+            SyncToolToggleButtons(session.ActiveTool);
             _ = GenerateThumbnailsAsync(session);
         }
         else
@@ -85,6 +98,8 @@ public partial class MainWindow : Window
             PageObjectList.ItemsSource = null;
             DocumentTabs.SelectedItem = null;
             TxtSearch.Text = string.Empty;
+            FloatingSearchBar.Visibility = Visibility.Collapsed;
+            RefreshRecentFilesUi();
         }
 
         UpdateUiState();
@@ -109,7 +124,7 @@ public partial class MainWindow : Window
         _thumbCts = new CancellationTokenSource();
         var ct = _thumbCts.Token;
 
-        const int maxThumbWidth = 140;
+        const int maxThumbWidth = 148;
         var pagesSnapshot = session.Pages.ToArray();
         foreach (var page in pagesSnapshot)
         {
@@ -131,18 +146,9 @@ public partial class MainWindow : Window
                 bmp.Freeze();
                 page.ThumbnailImage = bmp;
             }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-            catch (ObjectDisposedException)
-            {
-                break;
-            }
-            catch (PdfEngineException)
-            {
-                break;
-            }
+            catch (OperationCanceledException) { break; }
+            catch (ObjectDisposedException) { break; }
+            catch (PdfEngineException) { break; }
         }
     }
 
@@ -151,14 +157,21 @@ public partial class MainWindow : Window
         try
         {
             _workspace.OpenDocument(filePath);
+            RecentFilesService.Record(filePath);
+            StatusMessage.Text = System.IO.Path.GetFileName(filePath);
         }
         catch (PdfEngineException pex) when (pex.Status == PvStatus.PasswordRequired)
         {
-            string? pwd = PromptInput("Documento protegido con contraseña", $"Introduce la contraseña para \"{System.IO.Path.GetFileName(filePath)}\":");
+            string? pwd = PromptInput(
+                "Documento protegido",
+                $"Introduce la contraseña para abrir \"{System.IO.Path.GetFileName(filePath)}\":",
+                isPassword: true);
             if (string.IsNullOrEmpty(pwd)) return;
             try
             {
                 _workspace.OpenDocument(filePath, pwd);
+                RecentFilesService.Record(filePath);
+                StatusMessage.Text = System.IO.Path.GetFileName(filePath);
             }
             catch (Exception ex2)
             {
@@ -168,7 +181,7 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"No se pudo abrir el PDF:\n{ex.Message}", "Error al abrir PDF",
+            MessageBox.Show(this, $"No se pudo abrir el documento:\n{ex.Message}", "Error al abrir PDF",
                 MessageBoxButton.OK, MessageBoxImage.Error);
         }
     }
@@ -179,15 +192,56 @@ public partial class MainWindow : Window
         bool hasDoc = session is not null && session.PageCount > 0;
         bool multiPage = hasDoc && session!.PageCount > 1;
 
+        WorkspaceContainer.Visibility = hasDoc ? Visibility.Visible : Visibility.Collapsed;
+        TabStripBorder.Visibility = _workspace.OpenSessions.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        WelcomeContainer.Visibility = hasDoc ? Visibility.Collapsed : Visibility.Visible;
+
         BtnSave.IsEnabled = hasDoc && session!.IsModified;
-        BtnSaveAs.IsEnabled = hasDoc;
+        MenuSave.IsEnabled = BtnSave.IsEnabled;
+        MenuSaveAs.IsEnabled = hasDoc;
+        MenuOptimize.IsEnabled = hasDoc;
+        MenuPrint.IsEnabled = hasDoc;
         BtnPrint.IsEnabled = hasDoc;
-        BtnOptimize.IsEnabled = hasDoc;
-        BtnEncrypt.IsEnabled = hasDoc;
-        BtnSignPades.IsEnabled = hasDoc;
-        BtnAddTextField.IsEnabled = hasDoc;
+        MenuCloseTab.IsEnabled = hasDoc;
+
         BtnUndo.IsEnabled = hasDoc && session!.History.CanUndo;
         BtnRedo.IsEnabled = hasDoc && session!.History.CanRedo;
+        MenuUndo.IsEnabled = BtnUndo.IsEnabled;
+        MenuRedo.IsEnabled = BtnRedo.IsEnabled;
+        BtnUndo.ToolTip = session?.History.NextUndoDescription is string u ? $"Deshacer: {u} (Ctrl+Z)" : "Deshacer (Ctrl+Z)";
+        BtnRedo.ToolTip = session?.History.NextRedoDescription is string r ? $"Rehacer: {r} (Ctrl+Y)" : "Rehacer (Ctrl+Y)";
+
+        MenuCopy.IsEnabled = hasDoc;
+        MenuFind.IsEnabled = hasDoc;
+        MenuInsertImage.IsEnabled = hasDoc;
+        MenuAddTextField.IsEnabled = hasDoc;
+        MenuZoomIn.IsEnabled = hasDoc;
+        MenuZoomOut.IsEnabled = hasDoc;
+        MenuResetZoom.IsEnabled = hasDoc;
+        MenuFitWidth.IsEnabled = hasDoc;
+        MenuDarkRead.IsEnabled = hasDoc;
+
+        MenuRotatePage.IsEnabled = hasDoc;
+        MenuMoveUp.IsEnabled = multiPage && session!.CurrentPageIndex > 0;
+        MenuMoveDown.IsEnabled = multiPage && session!.CurrentPageIndex < session.PageCount - 1;
+        MenuMergePdf.IsEnabled = hasDoc;
+        MenuExtractPage.IsEnabled = hasDoc;
+        MenuDeletePage.IsEnabled = multiPage;
+
+        MenuOcrPage.IsEnabled = hasDoc;
+        MenuOcrAll.IsEnabled = hasDoc;
+        MenuSignPades.IsEnabled = hasDoc;
+        MenuEncrypt.IsEnabled = hasDoc;
+        MenuSanitize.IsEnabled = hasDoc;
+
+        BtnPrev.IsEnabled = hasDoc && session!.CurrentPageIndex > 0;
+        BtnNext.IsEnabled = hasDoc && session!.CurrentPageIndex < session.PageCount - 1;
+        TxtPageJump.IsEnabled = hasDoc;
+        BtnZoomIn.IsEnabled = hasDoc;
+        BtnZoomOut.IsEnabled = hasDoc;
+        CmbZoom.IsEnabled = hasDoc;
+        BtnRotatePage.IsEnabled = hasDoc;
+
         ToolSelect.IsEnabled = hasDoc;
         ToolHighlight.IsEnabled = hasDoc;
         ToolSquare.IsEnabled = hasDoc;
@@ -195,59 +249,132 @@ public partial class MainWindow : Window
         ToolInk.IsEnabled = hasDoc;
         ToolAddText.IsEnabled = hasDoc;
         ToolRedact.IsEnabled = hasDoc;
-        BtnInsertImage.IsEnabled = hasDoc;
-        BtnSanitize.IsEnabled = hasDoc;
-        BtnOcrPage.IsEnabled = hasDoc;
-        BtnOcrAll.IsEnabled = hasDoc;
-        ChkDarkRead.IsEnabled = hasDoc;
-        if (hasDoc) ChkDarkRead.IsChecked = session!.DarkReadingMode;
-        BtnUndo.ToolTip = session?.History.NextUndoDescription is string u ? $"Deshacer: {u} (Ctrl+Z)" : "Deshacer (Ctrl+Z)";
-        BtnRedo.ToolTip = session?.History.NextRedoDescription is string r ? $"Rehacer: {r} (Ctrl+Y)" : "Rehacer (Ctrl+Y)";
+        BtnDarkRead.IsEnabled = hasDoc;
+        BtnSearchToggle.IsEnabled = hasDoc;
 
-        BtnPrev.IsEnabled = hasDoc && session!.CurrentPageIndex > 0;
-        BtnNext.IsEnabled = hasDoc && session!.CurrentPageIndex < session.PageCount - 1;
-        BtnZoomIn.IsEnabled = hasDoc;
-        BtnZoomOut.IsEnabled = hasDoc;
-        BtnFitWidth.IsEnabled = hasDoc;
-        BtnResetZoom.IsEnabled = hasDoc;
-
-        BtnRotatePage.IsEnabled = hasDoc;
-        BtnMoveUp.IsEnabled = multiPage && session!.CurrentPageIndex > 0;
-        BtnMoveDown.IsEnabled = multiPage && session!.CurrentPageIndex < session.PageCount - 1;
-        BtnMergePdf.IsEnabled = hasDoc;
-        BtnExtractPage.IsEnabled = hasDoc;
-        BtnDeletePage.IsEnabled = multiPage;
-
-        TxtSearch.IsEnabled = hasDoc;
-        BtnSearch.IsEnabled = hasDoc;
-        BtnSearchPrev.IsEnabled = hasDoc && session!.TotalSearchMatches > 0;
-        BtnSearchNext.IsEnabled = hasDoc && session!.TotalSearchMatches > 0;
-
-        if (hasDoc)
+        _isUpdatingControls = true;
+        try
         {
-            Title = $"{session!.DisplayTabTitle} — PDFVisor";
-            TxtPageIndicator.Text = $"{session.CurrentPageNumber} / {session.PageCount}";
-            TxtZoom.Text = session.ZoomPercentText;
-            TxtSearchStatus.Text = session.SearchStatusText;
-            StatusFile.Text = session.FilePath;
-            StatusPageSize.Text = session.CurrentPageSizeText;
-            if (PageList.SelectedIndex != session.CurrentPageIndex && session.CurrentPageIndex < PageList.Items.Count)
+            if (hasDoc)
             {
-                PageList.SelectedIndex = session.CurrentPageIndex;
-                PageList.ScrollIntoView(PageList.SelectedItem);
+                Title = $"{session!.DisplayTabTitle} — PDFVisor";
+                if (!TxtPageJump.IsKeyboardFocused)
+                    TxtPageJump.Text = session.CurrentPageNumber.ToString();
+                TxtPageTotal.Text = $"/ {session.PageCount}";
+                CmbZoom.Text = session.ZoomPercentText;
+                TxtSearchStatus.Text = session.SearchStatusText;
+                StatusPageSize.Text = session.CurrentPageSizeText;
+                StatusZoom.Text = session.ZoomPercentText;
+                BtnDarkRead.IsChecked = session.DarkReadingMode;
+                MenuDarkRead.IsChecked = session.DarkReadingMode;
+
+                if (PageList.SelectedIndex != session.CurrentPageIndex && session.CurrentPageIndex < PageList.Items.Count)
+                {
+                    PageList.SelectedIndex = session.CurrentPageIndex;
+                    PageList.ScrollIntoView(PageList.SelectedItem);
+                }
+            }
+            else
+            {
+                Title = "PDFVisor";
+                TxtPageJump.Text = string.Empty;
+                TxtPageTotal.Text = "/ 0";
+                CmbZoom.SelectedIndex = 2; // 100%
+                StatusMessage.Text = "Listo";
+                StatusPageSize.Text = string.Empty;
+                StatusZoom.Text = string.Empty;
+                BtnDarkRead.IsChecked = false;
+                MenuDarkRead.IsChecked = false;
             }
         }
-        else
+        finally
         {
-            Title = "PDFVisor — Visor y Editor PDF Profesional";
-            TxtPageIndicator.Text = "0 / 0";
-            TxtZoom.Text = "100%";
-            TxtSearchStatus.Text = string.Empty;
-            StatusFile.Text = "Sin documento abierto — arrastra archivos .pdf o pulsa Abrir (Ctrl+O)";
-            StatusPageSize.Text = string.Empty;
+            _isUpdatingControls = false;
         }
     }
 
+    // --- Activity Rail & Collapsible Side Panel ---
+    private void RailButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is not ToggleButton clicked) return;
+
+        ToggleButton[] rail = [RailThumbnails, RailBookmarks, RailForms, RailSignatures, RailObjects];
+        bool alreadyActive = clicked.IsChecked == false;
+        if (alreadyActive)
+        {
+            SetSidebarOpen(false);
+            return;
+        }
+
+        foreach (var btn in rail)
+            btn.IsChecked = ReferenceEquals(btn, clicked);
+
+        PageList.Visibility = ReferenceEquals(clicked, RailThumbnails) ? Visibility.Visible : Visibility.Collapsed;
+        BookmarkList.Visibility = ReferenceEquals(clicked, RailBookmarks) ? Visibility.Visible : Visibility.Collapsed;
+        FormsPanel.Visibility = ReferenceEquals(clicked, RailForms) ? Visibility.Visible : Visibility.Collapsed;
+        SignaturesPanel.Visibility = ReferenceEquals(clicked, RailSignatures) ? Visibility.Visible : Visibility.Collapsed;
+        PageObjectList.Visibility = ReferenceEquals(clicked, RailObjects) ? Visibility.Visible : Visibility.Collapsed;
+
+        TxtSidePanelTitle.Text = clicked switch
+        {
+            _ when ReferenceEquals(clicked, RailThumbnails) => "Miniaturas",
+            _ when ReferenceEquals(clicked, RailBookmarks) => "Marcadores",
+            _ when ReferenceEquals(clicked, RailForms) => "Formularios",
+            _ when ReferenceEquals(clicked, RailSignatures) => "Firmas digitales",
+            _ => "Objetos de página"
+        };
+
+        SetSidebarOpen(true);
+    }
+
+    private void BtnCollapseSidebar_Click(object sender, RoutedEventArgs e)
+    {
+        ToggleButton[] rail = [RailThumbnails, RailBookmarks, RailForms, RailSignatures, RailObjects];
+        foreach (var btn in rail) btn.IsChecked = false;
+        SetSidebarOpen(false);
+    }
+
+    private void SetSidebarOpen(bool open)
+    {
+        _isSidebarOpen = open;
+        SidePanelBorder.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        SideSplitter.Visibility = open ? Visibility.Visible : Visibility.Collapsed;
+        SidePanelColumn.Width = open ? new GridLength(240) : new GridLength(0);
+        SideSplitterColumn.Width = open ? new GridLength(4) : new GridLength(0);
+    }
+
+    // --- Segmented Tool Toggle Buttons ---
+    private void ToolButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null || sender is not ToggleButton clicked) return;
+
+        AnnotationTool chosen = clicked switch
+        {
+            _ when ReferenceEquals(clicked, ToolHighlight) => AnnotationTool.Highlight,
+            _ when ReferenceEquals(clicked, ToolSquare) => AnnotationTool.Square,
+            _ when ReferenceEquals(clicked, ToolNote) => AnnotationTool.Note,
+            _ when ReferenceEquals(clicked, ToolInk) => AnnotationTool.Ink,
+            _ when ReferenceEquals(clicked, ToolAddText) => AnnotationTool.AddText,
+            _ when ReferenceEquals(clicked, ToolRedact) => AnnotationTool.Redact,
+            _ => AnnotationTool.None
+        };
+
+        _boundSession.ActiveTool = chosen;
+        SyncToolToggleButtons(chosen);
+    }
+
+    private void SyncToolToggleButtons(AnnotationTool tool)
+    {
+        ToolSelect.IsChecked = tool == AnnotationTool.None;
+        ToolHighlight.IsChecked = tool == AnnotationTool.Highlight;
+        ToolSquare.IsChecked = tool == AnnotationTool.Square;
+        ToolNote.IsChecked = tool == AnnotationTool.Note;
+        ToolInk.IsChecked = tool == AnnotationTool.Ink;
+        ToolAddText.IsChecked = tool == AnnotationTool.AddText;
+        ToolRedact.IsChecked = tool == AnnotationTool.Redact;
+    }
+
+    // --- File & Tab Actions ---
     private void BtnOpen_Click(object sender, RoutedEventArgs e)
     {
         var dlg = new OpenFileDialog
@@ -258,11 +385,20 @@ public partial class MainWindow : Window
         };
         if (dlg.ShowDialog(this) == true)
         {
-            foreach (var file in dlg.FileNames)
-            {
-                OpenFile(file);
-            }
+            foreach (var file in dlg.FileNames) OpenFile(file);
         }
+    }
+
+    private void RecentFilesList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (RecentFilesList.SelectedItem is RecentFileItem item)
+            OpenFile(item.FilePath);
+    }
+
+    private void BtnClearRecent_Click(object sender, RoutedEventArgs e)
+    {
+        RecentFilesService.Clear();
+        RefreshRecentFilesUi();
     }
 
     private void BtnSave_Click(object sender, RoutedEventArgs e)
@@ -271,7 +407,7 @@ public partial class MainWindow : Window
         try
         {
             _boundSession.Save();
-            StatusFile.Text = $"Guardado: {_boundSession.FilePath}";
+            StatusMessage.Text = $"Guardado: {_boundSession.FileName}";
         }
         catch (Exception ex)
         {
@@ -294,7 +430,7 @@ public partial class MainWindow : Window
             try
             {
                 _boundSession.SaveAs(dlg.FileName);
-                StatusFile.Text = $"Copia guardada en: {dlg.FileName}";
+                StatusMessage.Text = $"Copia guardada: {System.IO.Path.GetFileName(dlg.FileName)}";
             }
             catch (Exception ex)
             {
@@ -304,18 +440,13 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnUndo_Click(object sender, RoutedEventArgs e) => _boundSession?.Undo();
-    private void BtnRedo_Click(object sender, RoutedEventArgs e) => _boundSession?.Redo();
-
     private void BtnPrint_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
         try
         {
             if (PdfPrintService.Print(_boundSession))
-            {
-                StatusFile.Text = $"Enviado a impresora: {_boundSession.FileName}";
-            }
+                StatusMessage.Text = $"Enviado a impresora: {_boundSession.FileName}";
         }
         catch (Exception ex)
         {
@@ -324,24 +455,291 @@ public partial class MainWindow : Window
         }
     }
 
-    private void ChkDarkRead_Changed(object sender, RoutedEventArgs e)
+    private void MenuCloseTab_Click(object sender, RoutedEventArgs e)
     {
-        if (_boundSession is not null)
+        if (_boundSession is not null) TryCloseSession(_boundSession);
+    }
+
+    private void MenuExit_Click(object sender, RoutedEventArgs e) => Close();
+
+    private void DocumentTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (DocumentTabs.SelectedItem is DocumentSession selected &&
+            !ReferenceEquals(_workspace.ActiveSession, selected))
         {
-            _boundSession.DarkReadingMode = ChkDarkRead.IsChecked == true;
+            _workspace.ActiveSession = selected;
         }
     }
 
-    private void Tool_Checked(object sender, RoutedEventArgs e)
+    private void BtnCloseTab_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is Button { Tag: DocumentSession session })
+            TryCloseSession(session);
+    }
+
+    private void TryCloseSession(DocumentSession session)
+    {
+        if (session.IsModified)
+        {
+            var answer = MessageBox.Show(
+                this,
+                $"¿Deseas guardar los cambios en \"{session.FileName}\" antes de cerrar?",
+                "Cambios sin guardar",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Warning);
+            if (answer == MessageBoxResult.Cancel) return;
+            if (answer == MessageBoxResult.Yes) session.Save();
+        }
+        _workspace.CloseSession(session);
+    }
+
+    // --- Navigation & Zoom ---
+    private void BtnPrev_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null) _boundSession.CurrentPageIndex--;
+    }
+
+    private void BtnNext_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null) _boundSession.CurrentPageIndex++;
+    }
+
+    private void TxtPageJump_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter)
+        {
+            CommitPageJump();
+            e.Handled = true;
+        }
+    }
+
+    private void TxtPageJump_LostFocus(object sender, RoutedEventArgs e) => CommitPageJump();
+
+    private void CommitPageJump()
     {
         if (_boundSession is null) return;
-        if (ToolHighlight.IsChecked == true) _boundSession.ActiveTool = AnnotationTool.Highlight;
-        else if (ToolSquare.IsChecked == true) _boundSession.ActiveTool = AnnotationTool.Square;
-        else if (ToolNote.IsChecked == true) _boundSession.ActiveTool = AnnotationTool.Note;
-        else if (ToolInk.IsChecked == true) _boundSession.ActiveTool = AnnotationTool.Ink;
-        else if (ToolAddText.IsChecked == true) _boundSession.ActiveTool = AnnotationTool.AddText;
-        else if (ToolRedact.IsChecked == true) _boundSession.ActiveTool = AnnotationTool.Redact;
-        else _boundSession.ActiveTool = AnnotationTool.None;
+        if (int.TryParse(TxtPageJump.Text.Trim(), out int pageNum))
+        {
+            _boundSession.CurrentPageIndex = Math.Clamp(pageNum - 1, 0, _boundSession.PageCount - 1);
+        }
+        else
+        {
+            TxtPageJump.Text = _boundSession.CurrentPageNumber.ToString();
+        }
+    }
+
+    private void BtnZoomIn_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null) _boundSession.Zoom *= 1.25;
+    }
+
+    private void BtnZoomOut_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null) _boundSession.Zoom /= 1.25;
+    }
+
+    private void BtnFitWidth_Click(object sender, RoutedEventArgs e) => PdfViewport.FitToWidth();
+
+    private void BtnResetZoom_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null) _boundSession.Zoom = 1.0;
+    }
+
+    private void CmbZoom_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isUpdatingControls || _boundSession is null || CmbZoom.SelectedItem is not ComboBoxItem item) return;
+        string? text = item.Content?.ToString();
+        if (text == "Ajustar")
+        {
+            PdfViewport.FitToWidth();
+        }
+        else if (text is not null && text.EndsWith('%') && double.TryParse(text.TrimEnd('%'), out double pct))
+        {
+            _boundSession.Zoom = pct / 100.0;
+        }
+    }
+
+    private void BtnDarkRead_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null)
+            _boundSession.DarkReadingMode = BtnDarkRead.IsChecked == true;
+    }
+
+    private void MenuDarkRead_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null)
+            _boundSession.DarkReadingMode = MenuDarkRead.IsChecked;
+    }
+
+    // --- Edit, History, Pages ---
+    private void BtnUndo_Click(object sender, RoutedEventArgs e) => _boundSession?.Undo();
+    private void BtnRedo_Click(object sender, RoutedEventArgs e) => _boundSession?.Redo();
+
+    private void MenuCopy_Click(object sender, RoutedEventArgs e)
+    {
+        string selected = PdfViewport.GetSelectedText();
+        if (!string.IsNullOrEmpty(selected))
+        {
+            Clipboard.SetText(selected);
+            StatusMessage.Text = $"Copiado al portapapeles ({selected.Length} caracteres)";
+        }
+    }
+
+    private void BtnRotatePage_Click(object sender, RoutedEventArgs e) => _boundSession?.RotateCurrentPagePermanent(1);
+
+    private void BtnMoveUp_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null && _boundSession.CurrentPageIndex > 0)
+            _boundSession.MoveCurrentPage(_boundSession.CurrentPageIndex - 1);
+    }
+
+    private void BtnMoveDown_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null && _boundSession.CurrentPageIndex < _boundSession.PageCount - 1)
+            _boundSession.MoveCurrentPage(_boundSession.CurrentPageIndex + 1);
+    }
+
+    private void BtnMergePdf_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        var dlg = new OpenFileDialog { Title = "Seleccionar PDF para unir", Filter = "Documentos PDF (*.pdf)|*.pdf" };
+        if (dlg.ShowDialog(this) == true)
+        {
+            try { _boundSession.ImportPagesFromFile(dlg.FileName); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"No se pudieron importar páginas:\n{ex.Message}", "Error al unir PDF",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+
+    private void BtnExtractPage_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        var dlg = new SaveFileDialog
+        {
+            Title = $"Extraer página {_boundSession.CurrentPageNumber}",
+            Filter = "Documentos PDF (*.pdf)|*.pdf",
+            FileName = $"pagina_{_boundSession.CurrentPageNumber}.pdf"
+        };
+        if (dlg.ShowDialog(this) == true)
+        {
+            try
+            {
+                _boundSession.ExtractCurrentPage(dlg.FileName);
+                StatusMessage.Text = $"Página {_boundSession.CurrentPageNumber} extraída";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"No se pudo extraer la página:\n{ex.Message}", "Error al extraer",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+
+    private void BtnDeletePage_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null && _boundSession.PageCount > 1)
+            _boundSession.DeleteCurrentPage();
+    }
+
+    private void BtnInsertImage_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        var dlg = new OpenFileDialog
+        {
+            Title = "Insertar imagen en el documento",
+            Filter = "Imágenes (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp"
+        };
+        if (dlg.ShowDialog(this) != true) return;
+
+        try
+        {
+            var bmp = new BitmapImage(new Uri(dlg.FileName));
+            var formatted = new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
+            int w = formatted.PixelWidth;
+            int h = formatted.PixelHeight;
+            byte[] pixels = new byte[w * h * 4];
+            formatted.CopyPixels(pixels, w * 4, 0);
+
+            double targetW = Math.Min(220.0, w * 72.0 / 96.0);
+            double targetH = targetW * ((double)h / Math.Max(1, w));
+            _boundSession.AddImageBgra(pixels, w, h, new PvRect { Left = 72, Bottom = 500, Right = 72 + targetW, Top = 500 + targetH });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"No se pudo insertar la imagen:\n{ex.Message}", "Error de imagen",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void BtnAddTextField_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        string? name = PromptInput("Nuevo campo de formulario", "Nombre del campo de texto:");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        try
+        {
+            _boundSession.AddTextFormField(name.Trim(), new PvRect { Left = 72, Bottom = 660, Right = 320, Top = 686 }, "");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error al añadir campo:\n{ex.Message}", "Error de formulario",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    // --- Security, Optimization & OCR ---
+    private void BtnOptimize_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        var dlg = new SaveFileDialog
+        {
+            Title = "Exportar PDF optimizado",
+            Filter = "Documentos PDF (*.pdf)|*.pdf",
+            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_optimizado.pdf"
+        };
+        if (dlg.ShowDialog(this) == true)
+        {
+            try
+            {
+                _boundSession.OptimizeAndExport(dlg.FileName, linearize: true, recompress: true, objectStreams: true);
+                StatusMessage.Text = $"PDF optimizado guardado: {System.IO.Path.GetFileName(dlg.FileName)}";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Error al optimizar:\n{ex.Message}", "Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+
+    private void BtnEncrypt_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        string? password = PromptInput("Proteger con contraseña", "Introduce la contraseña para abrir este documento:", isPassword: true);
+        if (string.IsNullOrWhiteSpace(password)) return;
+
+        var dlg = new SaveFileDialog
+        {
+            Title = "Guardar PDF protegido",
+            Filter = "Documentos PDF (*.pdf)|*.pdf",
+            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_protegido.pdf"
+        };
+        if (dlg.ShowDialog(this) == true)
+        {
+            try
+            {
+                _boundSession.EncryptAes256AndExport(dlg.FileName, userPassword: password, ownerPassword: password);
+                StatusMessage.Text = $"Documento protegido guardado: {System.IO.Path.GetFileName(dlg.FileName)}";
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Error al proteger el documento:\n{ex.Message}", "Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
     }
 
     private void BtnSanitize_Click(object sender, RoutedEventArgs e)
@@ -349,7 +747,7 @@ public partial class MainWindow : Window
         if (_boundSession is null) return;
         var dlg = new SaveFileDialog
         {
-            Title = "Exportar PDF saneado (sin metadatos ni historial)",
+            Title = "Exportar PDF saneado",
             Filter = "Documentos PDF (*.pdf)|*.pdf",
             FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_saneado.pdf"
         };
@@ -358,11 +756,50 @@ public partial class MainWindow : Window
             try
             {
                 _boundSession.SanitizeAndExport(dlg.FileName);
-                StatusFile.Text = $"PDF saneado guardado en: {dlg.FileName}";
+                StatusMessage.Text = $"Documento saneado guardado: {System.IO.Path.GetFileName(dlg.FileName)}";
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, $"Error al sanear PDF:\n{ex.Message}", "Error QPDF",
+                MessageBox.Show(this, $"Error al sanear:\n{ex.Message}", "Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+
+    private void BtnSignPades_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        var certs = PadesSignatureService.ListWindowsSigningCertificates();
+        if (certs.Count == 0)
+        {
+            MessageBox.Show(this,
+                "No se encontraron certificados con clave privada en el almacén personal de Windows.",
+                "Sin certificados disponibles",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            return;
+        }
+
+        var picker = new CertificatePickerDialog(certs) { Owner = this };
+        if (picker.ShowDialog() != true || picker.SelectedCertificate is null) return;
+
+        var dlg = new SaveFileDialog
+        {
+            Title = "Guardar PDF firmado",
+            Filter = "Documentos PDF (*.pdf)|*.pdf",
+            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_firmado.pdf"
+        };
+        if (dlg.ShowDialog(this) == true)
+        {
+            try
+            {
+                _boundSession.SignPadesAndExport(dlg.FileName, picker.SelectedCertificate, reason: picker.Reason, tsaUrl: picker.TsaUrl);
+                StatusMessage.Text = $"Documento firmado: {System.IO.Path.GetFileName(dlg.FileName)}";
+                OpenFile(dlg.FileName);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, $"Error al firmar:\n{ex.Message}", "Error de firma",
                     MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
@@ -372,23 +809,37 @@ public partial class MainWindow : Window
     {
         if (_boundSession is null || _boundSession.PageCount == 0) return;
         int words = await RunOcrOnPageAsync(_boundSession, _boundSession.CurrentPageIndex);
-        if (words >= 0)
+        if (words >= 0) StatusMessage.Text = $"OCR completado ({words} palabras reconocidas)";
+    }
+
+    private async void BtnOcrAll_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null || _boundSession.PageCount == 0) return;
+        var session = _boundSession;
+        int totalPages = session.PageCount;
+        int totalWords = 0;
+
+        for (int p = 0; p < totalPages; p++)
         {
-            StatusFile.Text = $"OCR completado: {words} palabras inyectadas como capa buscable invisible.";
+            StatusMessage.Text = $"Reconociendo texto (OCR): página {p + 1} de {totalPages}...";
+            session.CurrentPageIndex = p;
+            int words = await RunOcrOnPageAsync(session, p);
+            if (words < 0) return;
+            totalWords += words;
         }
+        StatusMessage.Text = $"OCR completado: {totalWords} palabras en {totalPages} páginas";
     }
 
     private async Task<int> RunOcrOnPageAsync(DocumentSession session, int pageIndex)
     {
         var pageInfo = session.Pages[pageIndex];
-
         string installedWorker = System.IO.Path.Combine(AppContext.BaseDirectory, "workers", "PDFVisor.OcrWorker.exe");
         string devWorker = System.IO.Path.GetFullPath(System.IO.Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "..", "workers", "PDFVisor.OcrWorker", "bin", "Release", "net10.0-windows10.0.19041.0", "PDFVisor.OcrWorker.exe"));
         string workerExe = System.IO.File.Exists(installedWorker) ? installedWorker : devWorker;
         if (!System.IO.File.Exists(workerExe))
         {
-            MessageBox.Show(this, $"No se encontró PDFVisor.OcrWorker.exe en:\n{workerExe}", "Worker OCR no encontrado",
+            MessageBox.Show(this, "No se encontró el módulo OCR instalado.", "OCR no disponible",
                 MessageBoxButton.OK, MessageBoxImage.Warning);
             return -1;
         }
@@ -419,7 +870,7 @@ public partial class MainWindow : Window
 
             if (proc.ExitCode != 0)
             {
-                MessageBox.Show(this, $"Error en OCR Worker:\n{err}", "Error OCR", MessageBoxButton.OK, MessageBoxImage.Error);
+                MessageBox.Show(this, $"Error en OCR:\n{err}", "Error OCR", MessageBoxButton.OK, MessageBoxImage.Error);
                 return -1;
             }
 
@@ -448,408 +899,39 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnInsertImage_Click(object sender, RoutedEventArgs e)
+    // --- Floating Search Overlay ---
+    private void BtnToggleSearch_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
-        var dlg = new OpenFileDialog
-        {
-            Title = "Insertar imagen en el PDF",
-            Filter = "Imágenes (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp"
-        };
-        if (dlg.ShowDialog(this) != true) return;
+        FloatingSearchBar.Visibility = Visibility.Visible;
+        TxtSearch.Focus();
+        TxtSearch.SelectAll();
+    }
 
-        try
+    private async void BtnCloseSearch_Click(object sender, RoutedEventArgs e)
+    {
+        FloatingSearchBar.Visibility = Visibility.Collapsed;
+        if (_boundSession is not null)
         {
-            var bmp = new BitmapImage(new Uri(dlg.FileName));
-            var formatted = new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
-            int w = formatted.PixelWidth;
-            int h = formatted.PixelHeight;
-            byte[] pixels = new byte[w * h * 4];
-            formatted.CopyPixels(pixels, w * 4, 0);
-
-            double targetW = Math.Min(220.0, w * 72.0 / 96.0);
-            double targetH = targetW * ((double)h / Math.Max(1, w));
-            var rect = new PvRect { Left = 72, Bottom = 500, Right = 72 + targetW, Top = 500 + targetH };
-            _boundSession.AddImageBgra(pixels, w, h, rect);
+            await _boundSession.SearchAsync(string.Empty);
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"No se pudo insertar la imagen:\n{ex.Message}", "Error de imagen",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-        }
-    }
-
-    private void PageObjectList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (_boundSession is null || PageObjectList.SelectedItem is not PdfPageObjectInfo obj) return;
-        if (obj.Type != PdfPageObjectType.Text) return;
-
-        string? edited = PromptInput("Editar texto del PDF", "Nuevo texto:");
-        if (string.IsNullOrWhiteSpace(edited)) return;
-        try
-        {
-            _boundSession.EditTextObject(obj.Index, obj.Text, edited);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"No se pudo editar el texto:\n{ex.Message}", "Error al editar texto",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-        }
-    }
-
-    private void BtnOptimize_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is null) return;
-        var dlg = new SaveFileDialog
-        {
-            Title = "Exportar PDF optimizado y linealizado (QPDF)",
-            Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_optimizado.pdf"
-        };
-        if (dlg.ShowDialog(this) == true)
-        {
-            try
-            {
-                _boundSession.OptimizeAndExport(dlg.FileName, linearize: true, recompress: true, objectStreams: true);
-                StatusFile.Text = $"PDF optimizado y linealizado en: {dlg.FileName}";
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Error al optimizar con QPDF:\n{ex.Message}", "Error QPDF",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-    }
-
-    private void BtnEncrypt_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is null) return;
-        string? password = PromptInput("Cifrar PDF con AES-256 (QPDF)", "Contraseña de apertura (usuario):");
-        if (string.IsNullOrWhiteSpace(password)) return;
-
-        var dlg = new SaveFileDialog
-        {
-            Title = "Guardar PDF cifrado AES-256",
-            Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_cifrado.pdf"
-        };
-        if (dlg.ShowDialog(this) == true)
-        {
-            try
-            {
-                _boundSession.EncryptAes256AndExport(dlg.FileName, userPassword: password, ownerPassword: password);
-                StatusFile.Text = $"PDF cifrado AES-256 guardado en: {dlg.FileName}";
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Error al cifrar con QPDF:\n{ex.Message}", "Error AES-256",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-    }
-
-    private void BtnSignPades_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is null) return;
-        var certs = PadesSignatureService.ListWindowsSigningCertificates();
-        if (certs.Count == 0)
-        {
-            MessageBox.Show(this,
-                "No se encontraron certificados con clave privada en el almacén personal de Windows (CurrentUser\\My).",
-                "Sin certificados disponibles",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
-            return;
-        }
-
-        var (selectedCert, tsaUrl) = PromptCertificateAndTsa(certs);
-        if (selectedCert is null) return;
-
-        var dlg = new SaveFileDialog
-        {
-            Title = "Guardar PDF firmado (PAdES)",
-            Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_firmado.pdf"
-        };
-        if (dlg.ShowDialog(this) == true)
-        {
-            try
-            {
-                _boundSession.SignPadesAndExport(dlg.FileName, selectedCert, tsaUrl: string.IsNullOrWhiteSpace(tsaUrl) ? null : tsaUrl.Trim());
-                StatusFile.Text = $"PDF firmado (PAdES) en: {dlg.FileName}";
-                OpenFile(dlg.FileName);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"Error al firmar PDF:\n{ex.Message}", "Error de firma PAdES",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-    }
-
-    private (System.Security.Cryptography.X509Certificates.X509Certificate2? Cert, string? TsaUrl) PromptCertificateAndTsa(
-        IReadOnlyList<System.Security.Cryptography.X509Certificates.X509Certificate2> certs)
-    {
-        var win = new Window
-        {
-            Title = "Seleccionar certificado de firma (Windows CNG)",
-            Width = 480,
-            Height = 320,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            Owner = this
-        };
-        var panel = new DockPanel { Margin = new Thickness(14) };
-        var bottom = new StackPanel { Orientation = Orientation.Vertical };
-        DockPanel.SetDock(bottom, Dock.Bottom);
-        bottom.Children.Add(new TextBlock { Text = "URL de sellado de tiempo RFC 3161 (TSA, opcional para PAdES-B-T):", Margin = new Thickness(0, 8, 0, 4) });
-        var tbTsa = new TextBox { Padding = new Thickness(6, 4, 6, 4), Margin = new Thickness(0, 0, 0, 10) };
-        bottom.Children.Add(tbTsa);
-        var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-        var ok = new Button { Content = "Firmar", IsDefault = true, Padding = new Thickness(14, 4, 14, 4), Margin = new Thickness(0, 0, 8, 0) };
-        var cancel = new Button { Content = "Cancelar", IsCancel = true, Padding = new Thickness(14, 4, 14, 4) };
-        ok.Click += (_, _) => { win.DialogResult = true; win.Close(); };
-        btns.Children.Add(ok);
-        btns.Children.Add(cancel);
-        bottom.Children.Add(btns);
-        panel.Children.Add(bottom);
-
-        var list = new ListBox { SelectedIndex = 0 };
-        foreach (var c in certs)
-        {
-            string name = c.GetNameInfo(System.Security.Cryptography.X509Certificates.X509NameType.SimpleName, false);
-            list.Items.Add($"{name} — Emisor: {c.Issuer} (expira {c.NotAfter:yyyy-MM-dd})");
-        }
-        panel.Children.Add(list);
-        win.Content = panel;
-
-        if (win.ShowDialog() == true && list.SelectedIndex >= 0)
-            return (certs[list.SelectedIndex], tbTsa.Text);
-        return (null, null);
-    }
-
-    private async void BtnOcrAll_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is null || _boundSession.PageCount == 0) return;
-        var session = _boundSession;
-        int totalPages = session.PageCount;
-        int totalWords = 0;
-
-        for (int p = 0; p < totalPages; p++)
-        {
-            StatusFile.Text = $"OCR por lotes: procesando página {p + 1} / {totalPages}...";
-            session.CurrentPageIndex = p;
-            int words = await RunOcrOnPageAsync(session, p);
-            if (words < 0) return;
-            totalWords += words;
-        }
-        StatusFile.Text = $"OCR por lotes completado: {totalWords} palabras inyectadas en {totalPages} páginas.";
-    }
-
-    private void BtnAddTextField_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is null) return;
-        string? name = PromptInput("Nuevo campo de formulario", "Nombre del campo de texto:");
-        if (string.IsNullOrWhiteSpace(name)) return;
-        try
-        {
-            var rect = new PvRect { Left = 72, Bottom = 660, Right = 320, Top = 686 };
-            _boundSession.AddTextFormField(name.Trim(), rect, "");
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"Error al añadir campo:\n{ex.Message}", "Error de formulario",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-        }
-    }
-
-    private void FormFieldList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (_boundSession is null || FormFieldList.SelectedItem is not PdfFormField field) return;
-        string? newVal = PromptInput($"Editar campo \"{field.Name}\"", "Nuevo valor:");
-        if (newVal is null) return;
-        try
-        {
-            _boundSession.SetFormFieldValue(field.Name, newVal);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"Error al actualizar campo:\n{ex.Message}", "Error de formulario",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-        }
-    }
-
-    private string? PromptInput(string title, string label)
-    {
-        var win = new Window
-        {
-            Title = title,
-            Width = 380,
-            Height = 160,
-            WindowStartupLocation = WindowStartupLocation.CenterOwner,
-            ResizeMode = ResizeMode.NoResize,
-            Owner = this
-        };
-        var panel = new StackPanel { Margin = new Thickness(16) };
-        panel.Children.Add(new TextBlock { Text = label, Margin = new Thickness(0, 0, 0, 8) });
-        var tb = new TextBox { Margin = new Thickness(0, 0, 0, 12), Padding = new Thickness(6, 4, 6, 4) };
-        panel.Children.Add(tb);
-        var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right };
-        var ok = new Button { Content = "Aceptar", IsDefault = true, Padding = new Thickness(14, 4, 14, 4), Margin = new Thickness(0, 0, 8, 0) };
-        var cancel = new Button { Content = "Cancelar", IsCancel = true, Padding = new Thickness(14, 4, 14, 4) };
-        ok.Click += (_, _) => { win.DialogResult = true; win.Close(); };
-        btns.Children.Add(ok);
-        btns.Children.Add(cancel);
-        panel.Children.Add(btns);
-        win.Content = panel;
-        win.Loaded += (_, _) => tb.Focus();
-        return win.ShowDialog() == true ? tb.Text : null;
-    }
-
-    private void DocumentTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (DocumentTabs.SelectedItem is DocumentSession selected &&
-            !ReferenceEquals(_workspace.ActiveSession, selected))
-        {
-            _workspace.ActiveSession = selected;
-        }
-    }
-
-    private void BtnCloseTab_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is Button { Tag: DocumentSession session })
-        {
-            if (session.IsModified)
-            {
-                var answer = MessageBox.Show(
-                    this,
-                    $"El documento \"{session.FileName}\" tiene cambios sin guardar. ¿Guardar antes de cerrar?",
-                    "Cambios sin guardar",
-                    MessageBoxButton.YesNoCancel,
-                    MessageBoxImage.Warning);
-                if (answer == MessageBoxResult.Cancel) return;
-                if (answer == MessageBoxResult.Yes) session.Save();
-            }
-            _workspace.CloseSession(session);
-        }
-    }
-
-    private void BtnPrev_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is not null) _boundSession.CurrentPageIndex--;
-    }
-
-    private void BtnNext_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is not null) _boundSession.CurrentPageIndex++;
-    }
-
-    private void BtnZoomIn_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is not null) _boundSession.Zoom *= 1.25;
-    }
-
-    private void BtnZoomOut_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is not null) _boundSession.Zoom /= 1.25;
-    }
-
-    private void BtnFitWidth_Click(object sender, RoutedEventArgs e) => PdfViewport.FitToWidth();
-
-    private void BtnResetZoom_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is not null) _boundSession.Zoom = 1.0;
-    }
-
-    private void BtnRotatePage_Click(object sender, RoutedEventArgs e)
-    {
-        _boundSession?.RotateCurrentPagePermanent(1);
-    }
-
-    private void BtnMoveUp_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is not null && _boundSession.CurrentPageIndex > 0)
-        {
-            _boundSession.MoveCurrentPage(_boundSession.CurrentPageIndex - 1);
-        }
-    }
-
-    private void BtnMoveDown_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is not null && _boundSession.CurrentPageIndex < _boundSession.PageCount - 1)
-        {
-            _boundSession.MoveCurrentPage(_boundSession.CurrentPageIndex + 1);
-        }
-    }
-
-    private void BtnMergePdf_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is null) return;
-        var dlg = new OpenFileDialog
-        {
-            Title = "Seleccionar PDF para unir al final del documento",
-            Filter = "Documentos PDF (*.pdf)|*.pdf"
-        };
-        if (dlg.ShowDialog(this) == true)
-        {
-            try
-            {
-                _boundSession.ImportPagesFromFile(dlg.FileName);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"No se pudieron importar páginas:\n{ex.Message}", "Error al unir PDF",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-    }
-
-    private void BtnExtractPage_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is null) return;
-        var dlg = new SaveFileDialog
-        {
-            Title = $"Extraer página {_boundSession.CurrentPageNumber} como PDF",
-            Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = $"pagina_{_boundSession.CurrentPageNumber}.pdf"
-        };
-        if (dlg.ShowDialog(this) == true)
-        {
-            try
-            {
-                _boundSession.ExtractCurrentPage(dlg.FileName);
-                StatusFile.Text = $"Página {_boundSession.CurrentPageNumber} extraída en: {dlg.FileName}";
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, $"No se pudo extraer la página:\n{ex.Message}", "Error al extraer",
-                    MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-    }
-
-    private void BtnDeletePage_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is null || _boundSession.PageCount <= 1) return;
-        _boundSession.DeleteCurrentPage();
-    }
-
-    private async void BtnSearch_Click(object sender, RoutedEventArgs e)
-    {
-        if (_boundSession is null) return;
-        await _boundSession.SearchAsync(TxtSearch.Text);
     }
 
     private async void TxtSearch_KeyDown(object sender, KeyEventArgs e)
     {
+        if (e.Key == Key.Escape)
+        {
+            BtnCloseSearch_Click(sender, e);
+            e.Handled = true;
+            return;
+        }
         if (e.Key == Key.Enter && _boundSession is not null)
         {
             if (string.Equals(_boundSession.SearchQuery, TxtSearch.Text, StringComparison.Ordinal) &&
                 _boundSession.TotalSearchMatches > 0)
             {
-                if (Keyboard.Modifiers == ModifierKeys.Shift)
-                    _boundSession.PreviousSearchMatch();
-                else
-                    _boundSession.NextSearchMatch();
+                if (Keyboard.Modifiers == ModifierKeys.Shift) _boundSession.PreviousSearchMatch();
+                else _boundSession.NextSearchMatch();
             }
             else
             {
@@ -862,9 +944,11 @@ public partial class MainWindow : Window
     private void BtnSearchPrev_Click(object sender, RoutedEventArgs e) => _boundSession?.PreviousSearchMatch();
     private void BtnSearchNext_Click(object sender, RoutedEventArgs e) => _boundSession?.NextSearchMatch();
 
+    // --- Side Panel Interactions ---
     private void PageList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (_boundSession is not null && PageList.SelectedIndex >= 0 && PageList.SelectedIndex < _boundSession.PageCount)
+        if (!_isUpdatingControls && _boundSession is not null &&
+            PageList.SelectedIndex >= 0 && PageList.SelectedIndex < _boundSession.PageCount)
         {
             _boundSession.CurrentPageIndex = PageList.SelectedIndex;
         }
@@ -880,6 +964,41 @@ public partial class MainWindow : Window
         }
     }
 
+    private void FormFieldList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (_boundSession is null || FormFieldList.SelectedItem is not PdfFormField field) return;
+        string? newVal = PromptInput($"Editar campo \"{field.Name}\"", "Nuevo valor:", initialValue: field.Value);
+        if (newVal is null) return;
+        try { _boundSession.SetFormFieldValue(field.Name, newVal); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error al actualizar campo:\n{ex.Message}", "Error de formulario",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void PageObjectList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        if (_boundSession is null || PageObjectList.SelectedItem is not PdfPageObjectInfo obj) return;
+        if (obj.Type != PdfPageObjectType.Text) return;
+
+        string? edited = PromptInput("Editar texto", "Nuevo texto:", initialValue: obj.Text);
+        if (string.IsNullOrWhiteSpace(edited)) return;
+        try { _boundSession.EditTextObject(obj.Index, obj.Text, edited); }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"No se pudo editar el texto:\n{ex.Message}", "Error al editar texto",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private string? PromptInput(string title, string prompt, string initialValue = "", bool isPassword = false)
+    {
+        var dlg = new InputDialog(title, prompt, initialValue, isPassword) { Owner = this };
+        return dlg.ShowDialog() == true ? dlg.ResultText : null;
+    }
+
+    // --- Drag & Drop + Keyboard Shortcuts ---
     private void Window_DragOver(object sender, DragEventArgs e)
     {
         if (e.Data.GetDataPresent(DataFormats.FileDrop))
@@ -904,15 +1023,15 @@ public partial class MainWindow : Window
             if (files is not null)
             {
                 foreach (var file in files.Where(f => f.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase)))
-                {
                     OpenFile(file);
-                }
             }
         }
     }
 
     private void Window_KeyDown(object sender, KeyEventArgs e)
     {
+        bool typingInBox = TxtSearch.IsKeyboardFocused || TxtPageJump.IsKeyboardFocused;
+
         if (Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
         {
             if (e.Key == Key.S) { BtnSaveAs_Click(sender, e); e.Handled = true; }
@@ -922,25 +1041,24 @@ public partial class MainWindow : Window
             if (e.Key == Key.O) { BtnOpen_Click(sender, e); e.Handled = true; }
             else if (e.Key == Key.S) { BtnSave_Click(sender, e); e.Handled = true; }
             else if (e.Key == Key.P) { BtnPrint_Click(sender, e); e.Handled = true; }
-            else if (e.Key == Key.C && !TxtSearch.IsKeyboardFocused)
-            {
-                string selected = PdfViewport.GetSelectedText();
-                if (!string.IsNullOrEmpty(selected))
-                {
-                    Clipboard.SetText(selected);
-                    StatusFile.Text = $"Copiado al portapapeles ({selected.Length} caracteres)";
-                    e.Handled = true;
-                }
-            }
-            else if (e.Key == Key.Z && !TxtSearch.IsKeyboardFocused) { BtnUndo_Click(sender, e); e.Handled = true; }
-            else if (e.Key == Key.Y && !TxtSearch.IsKeyboardFocused) { BtnRedo_Click(sender, e); e.Handled = true; }
-            else if (e.Key == Key.F) { TxtSearch.Focus(); TxtSearch.SelectAll(); e.Handled = true; }
-            else if (e.Key == Key.W && _boundSession is not null) { _workspace.CloseSession(_boundSession); e.Handled = true; }
+            else if (e.Key == Key.F) { BtnToggleSearch_Click(sender, e); e.Handled = true; }
+            else if (e.Key == Key.W && _boundSession is not null) { TryCloseSession(_boundSession); e.Handled = true; }
+            else if (e.Key == Key.C && !typingInBox) { MenuCopy_Click(sender, e); e.Handled = true; }
+            else if (e.Key == Key.Z && !typingInBox) { BtnUndo_Click(sender, e); e.Handled = true; }
+            else if (e.Key == Key.Y && !typingInBox) { BtnRedo_Click(sender, e); e.Handled = true; }
             else if (e.Key is Key.Add or Key.OemPlus) { BtnZoomIn_Click(sender, e); e.Handled = true; }
             else if (e.Key is Key.Subtract or Key.OemMinus) { BtnZoomOut_Click(sender, e); e.Handled = true; }
             else if (e.Key is Key.D0 or Key.NumPad0) { BtnResetZoom_Click(sender, e); e.Handled = true; }
         }
-        else if (e.Key == Key.PageDown && !TxtSearch.IsKeyboardFocused) { BtnNext_Click(sender, e); e.Handled = true; }
-        else if (e.Key == Key.PageUp && !TxtSearch.IsKeyboardFocused) { BtnPrev_Click(sender, e); e.Handled = true; }
+        else if (e.Key == Key.Escape && FloatingSearchBar.Visibility == Visibility.Visible)
+        {
+            BtnCloseSearch_Click(sender, e);
+            e.Handled = true;
+        }
+        else if (!typingInBox)
+        {
+            if (e.Key == Key.PageDown) { BtnNext_Click(sender, e); e.Handled = true; }
+            else if (e.Key == Key.PageUp) { BtnPrev_Click(sender, e); e.Handled = true; }
+        }
     }
 }

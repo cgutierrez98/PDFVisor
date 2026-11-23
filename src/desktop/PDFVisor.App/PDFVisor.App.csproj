@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <Resource Include="Assets\PDFVisor.ico" />
+    <Resource Include="Assets\PDFVisor.png" />
   </ItemGroup>
 
   <ItemGroup>
