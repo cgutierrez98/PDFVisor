@@ -4,7 +4,12 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <UseWPF>true</UseWPF>
     <AssemblyName>PDFVisor</AssemblyName>
+    <ApplicationIcon>Assets\PDFVisor.ico</ApplicationIcon>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\PDFVisor.ico" />
+  </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\PDFVisor.Core\PDFVisor.Core.csproj" />
