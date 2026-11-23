@@ -491,6 +491,30 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         OnDocumentMutated(CurrentPageIndex);
     }
 
+    public async Task ApplyWatermarkToAllPagesAsync(
+        string text,
+        byte opacity = 55,
+        float fontSize = 54f,
+        double angleDegrees = 45.0,
+        IProgress<(int Current, int Total)>? progress = null)
+    {
+        if (PageCount == 0 || string.IsNullOrWhiteSpace(text)) return;
+        int total = PageCount;
+        uint rgba = (0x80808000u) | opacity;
+        await Task.Run(() =>
+        {
+            for (int i = 0; i < total; i++)
+            {
+                var size = _document.GetPageSize(i);
+                double x = size.WidthPt * 0.18;
+                double y = size.HeightPt * 0.30;
+                _document.AddRotatedText(i, text, fontSize, x, y, angleDegrees, rgba);
+                progress?.Report((i + 1, total));
+            }
+        });
+        OnDocumentMutated(CurrentPageIndex);
+    }
+
     public void ApplyPageNumbersToAllPages(string format = "Página {page} de {total}", float fontSize = 10f)
     {
         if (PageCount == 0) return;
@@ -508,6 +532,30 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         OnDocumentMutated(CurrentPageIndex);
     }
 
+    public async Task ApplyPageNumbersToAllPagesAsync(
+        string format = "Página {page} de {total}",
+        float fontSize = 10f,
+        IProgress<(int Current, int Total)>? progress = null)
+    {
+        if (PageCount == 0) return;
+        int total = PageCount;
+        await Task.Run(() =>
+        {
+            for (int i = 0; i < total; i++)
+            {
+                var size = _document.GetPageSize(i);
+                string label = format
+                    .Replace("{page}", (i + 1).ToString())
+                    .Replace("{total}", total.ToString());
+                double x = Math.Max(36, (size.WidthPt - label.Length * fontSize * 0.5) * 0.5);
+                double y = 24.0;
+                _document.AddTextObject(i, label, "Helvetica", fontSize, x, y, 0x444444FF);
+                progress?.Report((i + 1, total));
+            }
+        });
+        OnDocumentMutated(CurrentPageIndex);
+    }
+
     public PdfMetadata GetMetadata()
     {
         return QpdfTools.GetMetadata(_document.FilePath, _document.Password);
@@ -521,6 +569,26 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         {
             _document.SaveAs(tempSrc, incremental: false);
             QpdfTools.SetMetadata(tempSrc, tempOut, title, author, subject, keywords);
+            ApplyExternalPdfAndReload(tempOut);
+        }
+        finally
+        {
+            if (File.Exists(tempSrc)) try { File.Delete(tempSrc); } catch { }
+            if (File.Exists(tempOut)) try { File.Delete(tempOut); } catch { }
+        }
+    }
+
+    public async Task UpdateMetadataAsync(string title, string author, string subject, string keywords)
+    {
+        string tempSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_meta_src_{Guid.NewGuid():N}.pdf");
+        string tempOut = Path.Combine(Path.GetTempPath(), $"pdfvisor_meta_out_{Guid.NewGuid():N}.pdf");
+        try
+        {
+            await Task.Run(() =>
+            {
+                _document.SaveAs(tempSrc, incremental: false);
+                QpdfTools.SetMetadata(tempSrc, tempOut, title, author, subject, keywords);
+            });
             ApplyExternalPdfAndReload(tempOut);
         }
         finally

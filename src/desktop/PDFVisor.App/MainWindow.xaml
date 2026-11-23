@@ -11,6 +11,7 @@
         DragOver="Window_DragOver"
         KeyDown="Window_KeyDown"
         WindowStartupLocation="CenterScreen">
+    <Grid>
     <DockPanel LastChildFill="True">
 
         <!-- 1. Classic Native Menu Bar -->
@@ -267,7 +268,16 @@
         <!-- 4. Clean, Minimal Status Bar -->
         <StatusBar x:Name="MainStatusBar" DockPanel.Dock="Bottom" Padding="10,2">
             <StatusBarItem>
-                <TextBlock x:Name="StatusMessage" Text="Listo" FontSize="12" Opacity="0.82"/>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <ProgressBar x:Name="StatusProgressBar"
+                                 Width="84" Height="4"
+                                 IsIndeterminate="True"
+                                 Foreground="#D92638"
+                                 Margin="0,0,10,0"
+                                 Visibility="Collapsed"
+                                 VerticalAlignment="Center"/>
+                    <TextBlock x:Name="StatusMessage" Text="Listo" FontSize="12" Opacity="0.82"/>
+                </StackPanel>
             </StatusBarItem>
             <StatusBarItem HorizontalAlignment="Right">
                 <StackPanel Orientation="Horizontal">
@@ -535,4 +545,46 @@
             </Grid>
         </Grid>
     </DockPanel>
+
+    <!-- Global Fluent Busy / Loading Overlay for Heavy Operations -->
+    <Grid x:Name="BusyOverlay"
+          Visibility="Collapsed"
+          Background="#78000000"
+          IsHitTestVisible="True">
+        <Border HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                MinWidth="320"
+                MaxWidth="440"
+                Padding="26,22"
+                CornerRadius="10"
+                BorderBrush="#44888888"
+                BorderThickness="1"
+                Background="{Binding Background, RelativeSource={RelativeSource AncestorType=Window}}">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="28" ShadowDepth="6" Opacity="0.45" Color="Black"/>
+            </Border.Effect>
+            <StackPanel>
+                <TextBlock x:Name="TxtBusyTitle"
+                           Text="Procesando documento..."
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           TextWrapping="Wrap"/>
+                <TextBlock x:Name="TxtBusyDetail"
+                           Text=""
+                           FontSize="12.5"
+                           Opacity="0.72"
+                           Margin="0,6,0,0"
+                           TextWrapping="Wrap"
+                           Visibility="Collapsed"/>
+                <ProgressBar x:Name="BusyProgressBar"
+                             Height="5"
+                             Margin="0,16,0,0"
+                             Minimum="0"
+                             Maximum="100"
+                             IsIndeterminate="True"
+                             Foreground="#D92638"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+    </Grid>
 </Window>

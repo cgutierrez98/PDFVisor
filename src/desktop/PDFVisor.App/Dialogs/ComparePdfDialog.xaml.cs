@@ -17,7 +17,7 @@ public partial class ComparePdfDialog : Window
     private readonly IReadOnlyList<PageDiffItem> _diffs;
     private int _currentIndex;
 
-    public ComparePdfDialog(PdfDocument leftDoc, PdfDocument rightDoc, bool ownsRightDoc = true)
+    public ComparePdfDialog(PdfDocument leftDoc, PdfDocument rightDoc, bool ownsRightDoc = true, IReadOnlyList<PageDiffItem>? precomputedDiffs = null)
     {
         InitializeComponent();
         _leftDoc = leftDoc;
@@ -27,7 +27,7 @@ public partial class ComparePdfDialog : Window
         TxtLeftName.Text = $"Documento A: {Path.GetFileName(leftDoc.FilePath)}";
         TxtRightName.Text = $"Documento B: {Path.GetFileName(rightDoc.FilePath)}";
 
-        _diffs = PdfDiffService.CompareDocuments(leftDoc, rightDoc);
+        _diffs = precomputedDiffs ?? PdfDiffService.CompareDocuments(leftDoc, rightDoc);
         DiffList.ItemsSource = _diffs;
 
         int changed = _diffs.Count(d => d.Status != PageDiffStatus.Identical);

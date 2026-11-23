@@ -26,6 +26,71 @@ public partial class MainWindow : Window
     private WindowState _prevWindowState;
     private Point _thumbDragStart;
     private int _thumbDragIndex = -1;
+    private int _busyDepth;
+
+    private void SetBusy(bool busy, string title = "Procesando...", string detail = "", double? progressPercent = null)
+    {
+        if (busy)
+        {
+            _busyDepth++;
+            TxtBusyTitle.Text = title;
+            TxtBusyDetail.Text = detail;
+            TxtBusyDetail.Visibility = string.IsNullOrWhiteSpace(detail) ? Visibility.Collapsed : Visibility.Visible;
+            if (progressPercent.HasValue)
+            {
+                BusyProgressBar.IsIndeterminate = false;
+                BusyProgressBar.Value = Math.Clamp(progressPercent.Value, 0, 100);
+            }
+            else
+            {
+                BusyProgressBar.IsIndeterminate = true;
+            }
+            BusyOverlay.Visibility = Visibility.Visible;
+            Mouse.OverrideCursor = Cursors.Wait;
+        }
+        else
+        {
+            _busyDepth = Math.Max(0, _busyDepth - 1);
+            if (_busyDepth == 0)
+            {
+                BusyOverlay.Visibility = Visibility.Collapsed;
+                Mouse.OverrideCursor = null;
+            }
+        }
+    }
+
+    private void UpdateBusyProgress(string detail, double? progressPercent = null)
+    {
+        Dispatcher.Invoke(() =>
+        {
+            TxtBusyDetail.Text = detail;
+            TxtBusyDetail.Visibility = string.IsNullOrWhiteSpace(detail) ? Visibility.Collapsed : Visibility.Visible;
+            if (progressPercent.HasValue)
+            {
+                BusyProgressBar.IsIndeterminate = false;
+                BusyProgressBar.Value = Math.Clamp(progressPercent.Value, 0, 100);
+            }
+            else
+            {
+                BusyProgressBar.IsIndeterminate = true;
+            }
+        });
+    }
+
+    private async Task RunBusyAsync(string title, string detail, Func<Task> work)
+    {
+        SetBusy(true, title, detail);
+        try
+        {
+            // Yield so WPF renders the loading overlay before heavy work starts
+            await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Render);
+            await work();
+        }
+        finally
+        {
+            SetBusy(false);
+        }
+    }
 
     public MainWindow()
     {
@@ -545,13 +610,14 @@ public partial class MainWindow : Window
         RefreshRecentFilesUi();
     }
 
-    private void BtnSave_Click(object sender, RoutedEventArgs e)
+    private async void BtnSave_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         try
         {
-            _boundSession.Save();
-            StatusMessage.Text = $"Guardado: {_boundSession.FileName}";
+            await RunBusyAsync("Guardando documento...", session.FileName, () => Task.Run(() => session.Save()));
+            StatusMessage.Text = $"Guardado: {session.FileName}";
         }
         catch (Exception ex)
         {
@@ -560,21 +626,23 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnSaveAs_Click(object sender, RoutedEventArgs e)
+    private async void BtnSaveAs_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         var dlg = new SaveFileDialog
         {
             Title = "Guardar PDF como...",
             Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = _boundSession.FileName
+            FileName = session.FileName
         };
         if (dlg.ShowDialog(this) == true)
         {
             try
             {
-                _boundSession.SaveAs(dlg.FileName);
-                StatusMessage.Text = $"Copia guardada: {System.IO.Path.GetFileName(dlg.FileName)}";
+                string dest = dlg.FileName;
+                await RunBusyAsync("Guardando copia...", System.IO.Path.GetFileName(dest), () => Task.Run(() => session.SaveAs(dest)));
+                StatusMessage.Text = $"Copia guardada: {System.IO.Path.GetFileName(dest)}";
             }
             catch (Exception ex)
             {
@@ -610,7 +678,15 @@ public partial class MainWindow : Window
     private async void MenuCheckUpdates_Click(object sender, RoutedEventArgs e)
     {
         StatusMessage.Text = "Buscando actualizaciones...";
-        await CheckUpdatesInBackgroundAsync(silent: false);
+        StatusProgressBar.Visibility = Visibility.Visible;
+        try
+        {
+            await CheckUpdatesInBackgroundAsync(silent: false);
+        }
+        finally
+        {
+            StatusProgressBar.Visibility = Visibility.Collapsed;
+        }
     }
 
     private async Task CheckUpdatesInBackgroundAsync(bool silent)
@@ -730,33 +806,41 @@ public partial class MainWindow : Window
         System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(dir) { UseShellExecute = true });
     }
 
-    private void MenuExportImage_Click(object sender, RoutedEventArgs e)
+    private async void MenuExportImage_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null || _boundSession.PageCount == 0) return;
+        var session = _boundSession;
+        int pageIdx = session.CurrentPageIndex;
+        int pageNum = session.CurrentPageNumber;
         var dlg = new SaveFileDialog
         {
-            Title = $"Exportar página {_boundSession.CurrentPageNumber} como imagen",
+            Title = $"Exportar página {pageNum} como imagen",
             Filter = "Imagen PNG (*.png)|*.png|Imagen JPEG (*.jpg)|*.jpg",
-            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_p{_boundSession.CurrentPageNumber}.png"
+            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(session.FileName)}_p{pageNum}.png"
         };
         if (dlg.ShowDialog(this) != true) return;
 
         try
         {
-            var pageInfo = _boundSession.Pages[_boundSession.CurrentPageIndex];
-            const double exportDpi = 200.0;
-            int wPx = Math.Clamp((int)Math.Round(pageInfo.WidthPt * (exportDpi / 72.0)), 1, 8192);
-            int hPx = Math.Clamp((int)Math.Round(pageInfo.HeightPt * (exportDpi / 72.0)), 1, 8192);
-            byte[] bgra = _boundSession.Document.RenderPageBgra(_boundSession.CurrentPageIndex, wPx, hPx);
+            var pageInfo = session.Pages[pageIdx];
+            string outPath = dlg.FileName;
+            await RunBusyAsync("Exportando página como imagen...", $"Renderizando página {pageNum} a 200 DPI...", () => Task.Run(() =>
+            {
+                const double exportDpi = 200.0;
+                int wPx = Math.Clamp((int)Math.Round(pageInfo.WidthPt * (exportDpi / 72.0)), 1, 8192);
+                int hPx = Math.Clamp((int)Math.Round(pageInfo.HeightPt * (exportDpi / 72.0)), 1, 8192);
+                byte[] bgra = session.Document.RenderPageBgra(pageIdx, wPx, hPx);
 
-            var bmp = BitmapSource.Create(wPx, hPx, exportDpi, exportDpi, PixelFormats.Bgra32, null, bgra, wPx * 4);
-            BitmapEncoder encoder = dlg.FileName.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
-                ? new JpegBitmapEncoder { QualityLevel = 92 }
-                : new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(bmp));
-            using var fs = System.IO.File.Create(dlg.FileName);
-            encoder.Save(fs);
-            StatusMessage.Text = $"Página exportada: {System.IO.Path.GetFileName(dlg.FileName)}";
+                var bmp = BitmapSource.Create(wPx, hPx, exportDpi, exportDpi, PixelFormats.Bgra32, null, bgra, wPx * 4);
+                bmp.Freeze();
+                BitmapEncoder encoder = outPath.EndsWith(".jpg", StringComparison.OrdinalIgnoreCase)
+                    ? new JpegBitmapEncoder { QualityLevel = 92 }
+                    : new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(bmp));
+                using var fs = System.IO.File.Create(outPath);
+                encoder.Save(fs);
+            }));
+            StatusMessage.Text = $"Página exportada: {System.IO.Path.GetFileName(outPath)}";
         }
         catch (Exception ex)
         {
@@ -765,7 +849,7 @@ public partial class MainWindow : Window
         }
     }
 
-    private void MenuCreateFromImages_Click(object sender, RoutedEventArgs e)
+    private async void MenuCreateFromImages_Click(object sender, RoutedEventArgs e)
     {
         var openDlg = new OpenFileDialog
         {
@@ -785,42 +869,56 @@ public partial class MainWindow : Window
 
         try
         {
-            PdfDocument? created = null;
-            try
+            string[] files = openDlg.FileNames;
+            string destPath = saveDlg.FileName;
+            await RunBusyAsync("Creando PDF desde imágenes...", $"Procesando {files.Length} imagen(es)...", () => Task.Run(() =>
             {
-                for (int i = 0; i < openDlg.FileNames.Length; i++)
+                PdfDocument? created = null;
+                try
                 {
-                    var bmp = new BitmapImage(new Uri(openDlg.FileNames[i]));
-                    var formatted = new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
-                    int w = formatted.PixelWidth;
-                    int h = formatted.PixelHeight;
-                    byte[] pixels = new byte[w * h * 4];
-                    formatted.CopyPixels(pixels, w * 4, 0);
+                    for (int i = 0; i < files.Length; i++)
+                    {
+                        UpdateBusyProgress($"Imagen {i + 1} de {files.Length}: {System.IO.Path.GetFileName(files[i])}", (i * 100.0) / files.Length);
+                        var bmp = new BitmapImage();
+                        bmp.BeginInit();
+                        bmp.CacheOption = BitmapCacheOption.OnLoad;
+                        bmp.UriSource = new Uri(files[i]);
+                        bmp.EndInit();
+                        bmp.Freeze();
 
-                    double wPt = w * 72.0 / 96.0;
-                    double hPt = h * 72.0 / 96.0;
-                    int pageIdx;
-                    if (created is null)
-                    {
-                        created = PdfDocument.CreateBlank(wPt, hPt);
-                        pageIdx = 0;
+                        var formatted = new FormatConvertedBitmap(bmp, PixelFormats.Bgra32, null, 0);
+                        formatted.Freeze();
+                        int w = formatted.PixelWidth;
+                        int h = formatted.PixelHeight;
+                        byte[] pixels = new byte[w * h * 4];
+                        formatted.CopyPixels(pixels, w * 4, 0);
+
+                        double wPt = w * 72.0 / 96.0;
+                        double hPt = h * 72.0 / 96.0;
+                        int pageIdx;
+                        if (created is null)
+                        {
+                            created = PdfDocument.CreateBlank(wPt, hPt);
+                            pageIdx = 0;
+                        }
+                        else
+                        {
+                            pageIdx = created.AppendBlankPage(wPt, hPt);
+                        }
+                        created.AddImageBgra(pageIdx, pixels, w, h, new PvRect { Left = 0, Bottom = 0, Right = wPt, Top = hPt });
                     }
-                    else
-                    {
-                        pageIdx = created.AppendBlankPage(wPt, hPt);
-                    }
-                    created.AddImageBgra(pageIdx, pixels, w, h, new PvRect { Left = 0, Bottom = 0, Right = wPt, Top = hPt });
+
+                    UpdateBusyProgress("Guardando PDF generado...", 98);
+                    created?.SaveAs(destPath, incremental: false);
                 }
+                finally
+                {
+                    created?.Dispose();
+                }
+            }));
 
-                created?.SaveAs(saveDlg.FileName, incremental: false);
-            }
-            finally
-            {
-                created?.Dispose();
-            }
-
-            OpenFile(saveDlg.FileName);
-            StatusMessage.Text = $"PDF creado desde {openDlg.FileNames.Length} imagen(es)";
+            OpenFile(destPath);
+            StatusMessage.Text = $"PDF creado desde {files.Length} imagen(es)";
         }
         catch (Exception ex)
         {
@@ -970,16 +1068,22 @@ public partial class MainWindow : Window
         UpdateUiState();
     }
 
-    private void MenuProperties_Click(object sender, RoutedEventArgs e)
+    private async void MenuProperties_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         try
         {
-            var meta = _boundSession.GetMetadata();
-            var dlg = new DocumentPropertiesDialog(_boundSession.FilePath, _boundSession.PageCount, meta) { Owner = this };
+            PdfMetadata meta = default!;
+            await RunBusyAsync("Leyendo propiedades...", session.FileName, async () =>
+            {
+                meta = await Task.Run(() => session.GetMetadata());
+            });
+            var dlg = new DocumentPropertiesDialog(session.FilePath, session.PageCount, meta) { Owner = this };
             if (dlg.ShowDialog() == true)
             {
-                _boundSession.UpdateMetadata(dlg.MetaTitle, dlg.MetaAuthor, dlg.MetaSubject, dlg.MetaKeywords);
+                await RunBusyAsync("Guardando metadatos...", session.FileName, () =>
+                    session.UpdateMetadataAsync(dlg.MetaTitle, dlg.MetaAuthor, dlg.MetaSubject, dlg.MetaKeywords));
                 StatusMessage.Text = "Metadatos del documento actualizados";
             }
         }
@@ -990,10 +1094,11 @@ public partial class MainWindow : Window
         }
     }
 
-    private void MenuSplitPdf_Click(object sender, RoutedEventArgs e)
+    private async void MenuSplitPdf_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null || _boundSession.PageCount <= 1) return;
-        var dlg = new SplitPdfDialog(_boundSession.PageCount) { Owner = this };
+        var session = _boundSession;
+        var dlg = new SplitPdfDialog(session.PageCount) { Owner = this };
         if (dlg.ShowDialog() != true || dlg.SelectedGroups is null) return;
 
         var folderDlg = new OpenFolderDialog { Title = "Seleccionar carpeta de destino para los PDFs divididos" };
@@ -1001,10 +1106,16 @@ public partial class MainWindow : Window
 
         try
         {
-            string baseName = System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName);
-            var files = _boundSession.SplitIntoFiles(dlg.SelectedGroups, folderDlg.FolderName, baseName);
+            string baseName = System.IO.Path.GetFileNameWithoutExtension(session.FileName);
+            string outDir = folderDlg.FolderName;
+            var groups = dlg.SelectedGroups;
+            IReadOnlyList<string> files = Array.Empty<string>();
+            await RunBusyAsync("Dividiendo documento PDF...", $"Generando {groups.Count} archivo(s)...", () => Task.Run(() =>
+            {
+                files = session.SplitIntoFiles(groups, outDir, baseName);
+            }));
             StatusMessage.Text = $"Documento dividido en {files.Count} archivos";
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folderDlg.FolderName) { UseShellExecute = true });
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(outDir) { UseShellExecute = true });
         }
         catch (Exception ex)
         {
@@ -1013,18 +1124,25 @@ public partial class MainWindow : Window
         }
     }
 
-    private void MenuWatermark_Click(object sender, RoutedEventArgs e)
+    private async void MenuWatermark_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         var dlg = new WatermarkDialog { Owner = this };
         if (dlg.ShowDialog() != true) return;
 
         try
         {
-            if (dlg.ApplyWatermark)
-                _boundSession.ApplyWatermarkToAllPages(dlg.WatermarkText, dlg.WatermarkOpacity);
-            if (dlg.ApplyPageNumbers)
-                _boundSession.ApplyPageNumbersToAllPages(dlg.PageNumberFormat);
+            var progress = new Progress<(int Current, int Total)>(p =>
+                UpdateBusyProgress($"Página {p.Current} de {p.Total}...", (p.Current * 100.0) / Math.Max(1, p.Total)));
+
+            await RunBusyAsync("Aplicando marca de agua y numeración...", $"Procesando {session.PageCount} página(s)...", async () =>
+            {
+                if (dlg.ApplyWatermark)
+                    await session.ApplyWatermarkToAllPagesAsync(dlg.WatermarkText, dlg.WatermarkOpacity, progress: progress);
+                if (dlg.ApplyPageNumbers)
+                    await session.ApplyPageNumbersToAllPagesAsync(dlg.PageNumberFormat, progress: progress);
+            });
             StatusMessage.Text = "Marca de agua / numeración aplicada";
         }
         catch (Exception ex)
@@ -1034,9 +1152,10 @@ public partial class MainWindow : Window
         }
     }
 
-    private void MenuComparePdf_Click(object sender, RoutedEventArgs e)
+    private async void MenuComparePdf_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         var dlg = new OpenFileDialog
         {
             Title = "Seleccionar segundo PDF para comparar",
@@ -1046,8 +1165,16 @@ public partial class MainWindow : Window
 
         try
         {
-            var rightDoc = PdfDocument.Open(dlg.FileName);
-            var cmp = new ComparePdfDialog(_boundSession.Document, rightDoc, ownsRightDoc: true) { Owner = this };
+            PdfDocument? rightDoc = null;
+            IReadOnlyList<PageDiffItem>? diffs = null;
+            string rightPath = dlg.FileName;
+            await RunBusyAsync("Comparando documentos PDF...", $"Analizando texto página a página con {System.IO.Path.GetFileName(rightPath)}...", () => Task.Run(() =>
+            {
+                rightDoc = PdfDocument.Open(rightPath);
+                diffs = PdfDiffService.CompareDocuments(session.Document, rightDoc);
+            }));
+
+            var cmp = new ComparePdfDialog(session.Document, rightDoc!, ownsRightDoc: true, precomputedDiffs: diffs) { Owner = this };
             cmp.ShowDialog();
         }
         catch (Exception ex)
@@ -1128,13 +1255,23 @@ public partial class MainWindow : Window
             _boundSession.MoveCurrentPage(_boundSession.CurrentPageIndex + 1);
     }
 
-    private void BtnMergePdf_Click(object sender, RoutedEventArgs e)
+    private async void BtnMergePdf_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         var dlg = new OpenFileDialog { Title = "Seleccionar PDF para unir", Filter = "Documentos PDF (*.pdf)|*.pdf" };
         if (dlg.ShowDialog(this) == true)
         {
-            try { _boundSession.ImportPagesFromFile(dlg.FileName); }
+            try
+            {
+                string srcPath = dlg.FileName;
+                await RunBusyAsync("Uniendo documentos PDF...", System.IO.Path.GetFileName(srcPath), () =>
+                {
+                    session.ImportPagesFromFile(srcPath);
+                    return Task.CompletedTask;
+                });
+                StatusMessage.Text = $"Páginas importadas desde {System.IO.Path.GetFileName(srcPath)}";
+            }
             catch (Exception ex)
             {
                 MessageBox.Show(this, $"No se pudieron importar páginas:\n{ex.Message}", "Error al unir PDF",
@@ -1143,21 +1280,24 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnExtractPage_Click(object sender, RoutedEventArgs e)
+    private async void BtnExtractPage_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
+        int pageNum = session.CurrentPageNumber;
         var dlg = new SaveFileDialog
         {
-            Title = $"Extraer página {_boundSession.CurrentPageNumber}",
+            Title = $"Extraer página {pageNum}",
             Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = $"pagina_{_boundSession.CurrentPageNumber}.pdf"
+            FileName = $"pagina_{pageNum}.pdf"
         };
         if (dlg.ShowDialog(this) == true)
         {
             try
             {
-                _boundSession.ExtractCurrentPage(dlg.FileName);
-                StatusMessage.Text = $"Página {_boundSession.CurrentPageNumber} extraída";
+                string outPath = dlg.FileName;
+                await RunBusyAsync("Extrayendo página...", $"Guardando página {pageNum}...", () => Task.Run(() => session.ExtractCurrentPage(outPath)));
+                StatusMessage.Text = $"Página {pageNum} extraída";
             }
             catch (Exception ex)
             {
@@ -1220,21 +1360,24 @@ public partial class MainWindow : Window
     }
 
     // --- Security, Optimization & OCR ---
-    private void BtnOptimize_Click(object sender, RoutedEventArgs e)
+    private async void BtnOptimize_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         var dlg = new SaveFileDialog
         {
             Title = "Exportar PDF optimizado",
             Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_optimizado.pdf"
+            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(session.FileName)}_optimizado.pdf"
         };
         if (dlg.ShowDialog(this) == true)
         {
             try
             {
-                _boundSession.OptimizeAndExport(dlg.FileName, linearize: true, recompress: true, objectStreams: true);
-                StatusMessage.Text = $"PDF optimizado guardado: {System.IO.Path.GetFileName(dlg.FileName)}";
+                string dest = dlg.FileName;
+                await RunBusyAsync("Optimizando documento PDF...", "Recomprimiendo flujos y linealizando para carga rápida...", () =>
+                    Task.Run(() => session.OptimizeAndExport(dest, linearize: true, recompress: true, objectStreams: true)));
+                StatusMessage.Text = $"PDF optimizado guardado: {System.IO.Path.GetFileName(dest)}";
             }
             catch (Exception ex)
             {
@@ -1244,9 +1387,10 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnEncrypt_Click(object sender, RoutedEventArgs e)
+    private async void BtnEncrypt_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         string? password = PromptInput("Proteger con contraseña", "Introduce la contraseña para abrir este documento:", isPassword: true);
         if (string.IsNullOrWhiteSpace(password)) return;
 
@@ -1254,14 +1398,16 @@ public partial class MainWindow : Window
         {
             Title = "Guardar PDF protegido",
             Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_protegido.pdf"
+            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(session.FileName)}_protegido.pdf"
         };
         if (dlg.ShowDialog(this) == true)
         {
             try
             {
-                _boundSession.EncryptAes256AndExport(dlg.FileName, userPassword: password, ownerPassword: password);
-                StatusMessage.Text = $"Documento protegido guardado: {System.IO.Path.GetFileName(dlg.FileName)}";
+                string dest = dlg.FileName;
+                await RunBusyAsync("Cifrando documento (AES-256)...", System.IO.Path.GetFileName(dest), () =>
+                    Task.Run(() => session.EncryptAes256AndExport(dest, userPassword: password, ownerPassword: password)));
+                StatusMessage.Text = $"Documento protegido guardado: {System.IO.Path.GetFileName(dest)}";
             }
             catch (Exception ex)
             {
@@ -1271,21 +1417,24 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnSanitize_Click(object sender, RoutedEventArgs e)
+    private async void BtnSanitize_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         var dlg = new SaveFileDialog
         {
             Title = "Exportar PDF saneado",
             Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_saneado.pdf"
+            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(session.FileName)}_saneado.pdf"
         };
         if (dlg.ShowDialog(this) == true)
         {
             try
             {
-                _boundSession.SanitizeAndExport(dlg.FileName);
-                StatusMessage.Text = $"Documento saneado guardado: {System.IO.Path.GetFileName(dlg.FileName)}";
+                string dest = dlg.FileName;
+                await RunBusyAsync("Saneando metadatos e historial...", System.IO.Path.GetFileName(dest), () =>
+                    Task.Run(() => session.SanitizeAndExport(dest)));
+                StatusMessage.Text = $"Documento saneado guardado: {System.IO.Path.GetFileName(dest)}";
             }
             catch (Exception ex)
             {
@@ -1295,9 +1444,10 @@ public partial class MainWindow : Window
         }
     }
 
-    private void BtnSignPades_Click(object sender, RoutedEventArgs e)
+    private async void BtnSignPades_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null) return;
+        var session = _boundSession;
         var certs = PadesSignatureService.ListWindowsSigningCertificates();
         if (certs.Count == 0)
         {
@@ -1316,15 +1466,23 @@ public partial class MainWindow : Window
         {
             Title = "Guardar PDF firmado",
             Filter = "Documentos PDF (*.pdf)|*.pdf",
-            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName)}_firmado.pdf"
+            FileName = $"{System.IO.Path.GetFileNameWithoutExtension(session.FileName)}_firmado.pdf"
         };
         if (dlg.ShowDialog(this) == true)
         {
             try
             {
-                _boundSession.SignPadesAndExport(dlg.FileName, picker.SelectedCertificate, reason: picker.Reason, tsaUrl: picker.TsaUrl);
-                StatusMessage.Text = $"Documento firmado: {System.IO.Path.GetFileName(dlg.FileName)}";
-                OpenFile(dlg.FileName);
+                string dest = dlg.FileName;
+                var cert = picker.SelectedCertificate;
+                string? reason = picker.Reason;
+                string? tsaUrl = picker.TsaUrl;
+                string detail = string.IsNullOrWhiteSpace(tsaUrl)
+                    ? "Aplicando firma digital PAdES..."
+                    : "Aplicando firma digital PAdES y sello de tiempo TSA...";
+                await RunBusyAsync("Firmando documento digitalmente...", detail, () =>
+                    Task.Run(() => session.SignPadesAndExport(dest, cert, reason: reason, tsaUrl: tsaUrl)));
+                StatusMessage.Text = $"Documento firmado: {System.IO.Path.GetFileName(dest)}";
+                OpenFile(dest);
             }
             catch (Exception ex)
             {
@@ -1337,7 +1495,13 @@ public partial class MainWindow : Window
     private async void BtnOcrPage_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null || _boundSession.PageCount == 0) return;
-        int words = await RunOcrOnPageAsync(_boundSession, _boundSession.CurrentPageIndex);
+        var session = _boundSession;
+        int pageIdx = session.CurrentPageIndex;
+        int words = -1;
+        await RunBusyAsync("Reconociendo texto (OCR)...", $"Analizando página {pageIdx + 1}...", async () =>
+        {
+            words = await RunOcrOnPageAsync(session, pageIdx);
+        });
         if (words >= 0) StatusMessage.Text = $"OCR completado ({words} palabras reconocidas)";
     }
 
@@ -1348,14 +1512,19 @@ public partial class MainWindow : Window
         int totalPages = session.PageCount;
         int totalWords = 0;
 
-        for (int p = 0; p < totalPages; p++)
+        await RunBusyAsync("Reconociendo texto (OCR)...", $"Página 1 de {totalPages}...", async () =>
         {
-            StatusMessage.Text = $"Reconociendo texto (OCR): página {p + 1} de {totalPages}...";
-            session.CurrentPageIndex = p;
-            int words = await RunOcrOnPageAsync(session, p);
-            if (words < 0) return;
-            totalWords += words;
-        }
+            for (int p = 0; p < totalPages; p++)
+            {
+                UpdateBusyProgress($"Página {p + 1} de {totalPages}...", (p * 100.0) / Math.Max(1, totalPages));
+                StatusMessage.Text = $"Reconociendo texto (OCR): página {p + 1} de {totalPages}...";
+                session.CurrentPageIndex = p;
+                int words = await RunOcrOnPageAsync(session, p);
+                if (words < 0) return;
+                totalWords += words;
+            }
+            UpdateBusyProgress("Finalizando...", 100);
+        });
         StatusMessage.Text = $"OCR completado: {totalWords} palabras en {totalPages} páginas";
     }
 
@@ -1464,7 +1633,17 @@ public partial class MainWindow : Window
             }
             else
             {
-                await _boundSession.SearchAsync(TxtSearch.Text);
+                StatusProgressBar.Visibility = Visibility.Visible;
+                StatusMessage.Text = "Buscando en el documento...";
+                try
+                {
+                    await _boundSession.SearchAsync(TxtSearch.Text);
+                }
+                finally
+                {
+                    StatusProgressBar.Visibility = Visibility.Collapsed;
+                    StatusMessage.Text = string.IsNullOrWhiteSpace(_boundSession.SearchStatusText) ? "Listo" : $"Búsqueda: {_boundSession.SearchStatusText}";
+                }
             }
             e.Handled = true;
         }
