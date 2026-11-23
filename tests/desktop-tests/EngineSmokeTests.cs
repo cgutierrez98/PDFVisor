@@ -578,6 +578,63 @@ public sealed class EngineSmokeTests : IDisposable
         }
     }
 
+    [Fact]
+    public void V12_Split_Watermark_PageNumbers_Metadata_And_PdfDiff()
+    {
+        string docA = CreateTempPdf("Contract Clause Alpha");
+        string docB = CreateTempPdf("Contract Clause Beta");
+        string splitDir = Path.Combine(Path.GetTempPath(), $"pdfvisor_split_{Guid.NewGuid():N}");
+
+        try
+        {
+            // 1. PageRangeParser
+            var groups = PageRangeParser.ParseGroups("1-2, 3", 3);
+            Assert.Equal(2, groups.Count);
+            Assert.Equal([0, 1], groups[0]);
+            Assert.Equal([2], groups[1]);
+
+            using (var session = new DocumentSession(PdfDocument.Open(docA)))
+            {
+                // Merge docB so we have 2 pages, then split into 2 files
+                session.ImportPagesFromFile(docB);
+                Assert.Equal(2, session.PageCount);
+
+                var splitFiles = session.SplitIntoFiles(PageRangeParser.SplitEveryN(2, 1), splitDir, "contrato");
+                Assert.Equal(2, splitFiles.Count);
+                Assert.All(splitFiles, f => Assert.True(File.Exists(f)));
+
+                // 2. Watermark + Page Numbers
+                session.ApplyWatermarkToAllPages("CONFIDENCIAL", opacity: 60);
+                session.ApplyPageNumbersToAllPages("Page {page} of {total}");
+                Assert.Contains("CONFIDENCIAL", session.Document.ExtractPageText(0));
+                Assert.Contains("Page 1 of 2", session.Document.ExtractPageText(0));
+                Assert.Contains("Page 2 of 2", session.Document.ExtractPageText(1));
+                session.Save();
+
+                // 3. Metadata round-trip
+                session.UpdateMetadata("Contrato Marco", "Carlos", "Legal", "pdf,contrato");
+                var meta = session.GetMetadata();
+                Assert.Equal("Contrato Marco", meta.Title);
+                Assert.Equal("Carlos", meta.Author);
+                Assert.Equal("Legal", meta.Subject);
+                Assert.Equal("pdf,contrato", meta.Keywords);
+                Assert.False(string.IsNullOrWhiteSpace(meta.PdfVersion));
+            }
+
+            // 4. PdfDiffService (docA modified vs docB)
+            using var left = PdfDocument.Open(docA);
+            using var right = PdfDocument.Open(docB);
+            var diffs = PdfDiffService.CompareDocuments(left, right);
+            Assert.Equal(2, diffs.Count);
+            Assert.Equal(PageDiffStatus.Modified, diffs[0].Status);
+            Assert.Equal(PageDiffStatus.OnlyInLeft, diffs[1].Status);
+        }
+        finally
+        {
+            if (Directory.Exists(splitDir)) try { Directory.Delete(splitDir, recursive: true); } catch { }
+        }
+    }
+
     private static byte[] BuildMinimalValidPdf(string text)
     {
         var sb = new StringBuilder();

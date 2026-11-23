@@ -165,4 +165,42 @@ public static class QpdfTools
         var status = NativeMethods.pv_qpdf_sanitize_metadata(sourcePath, sourcePassword, destinationPath);
         PdfEngine.ThrowIfFailed(status);
     }
+
+    public static PdfMetadata GetMetadata(string pdfPath, string? password = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(pdfPath);
+        var status = NativeMethods.pv_qpdf_get_metadata(pdfPath, password, out var native);
+        PdfEngine.ThrowIfFailed(status);
+        try
+        {
+            return new PdfMetadata(
+                native.TitleUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(native.TitleUtf8) ?? "" : "",
+                native.AuthorUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(native.AuthorUtf8) ?? "" : "",
+                native.SubjectUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(native.SubjectUtf8) ?? "" : "",
+                native.KeywordsUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(native.KeywordsUtf8) ?? "" : "",
+                native.PdfVersionUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(native.PdfVersionUtf8) ?? "" : "",
+                native.IsEncrypted != 0,
+                native.IsLinearized != 0);
+        }
+        finally
+        {
+            NativeMethods.pv_free_metadata(ref native);
+        }
+    }
+
+    public static void SetMetadata(
+        string sourcePath,
+        string destinationPath,
+        string title,
+        string author,
+        string subject,
+        string keywords,
+        string? sourcePassword = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        var status = NativeMethods.pv_qpdf_set_metadata(
+            sourcePath, sourcePassword, destinationPath, title, author, subject, keywords);
+        PdfEngine.ThrowIfFailed(status);
+    }
 }

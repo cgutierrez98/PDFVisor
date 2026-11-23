@@ -91,6 +91,16 @@ typedef struct pv_page_object_info_t {
     char* text_utf8;
 } pv_page_object_info_t;
 
+typedef struct pv_metadata_t {
+    char* title_utf8;
+    char* author_utf8;
+    char* subject_utf8;
+    char* keywords_utf8;
+    char* pdf_version_utf8;
+    int32_t is_encrypted;
+    int32_t is_linearized;
+} pv_metadata_t;
+
 typedef struct pv_render_options_t {
     int32_t width_px;
     int32_t height_px;
@@ -335,6 +345,33 @@ PV_API pv_status_t pv_page_add_unicode_text_object(
     double y_pt,
     uint32_t rgba,
     int32_t* out_obj_index);
+
+/* v1.2: Watermarks (with rotation angle in degrees) & PDF Metadata */
+PV_API pv_status_t pv_page_add_rotated_text(
+    pv_document_handle doc,
+    int32_t page_index,
+    const char* utf8_text,
+    float font_size,
+    double x_pt,
+    double y_pt,
+    double angle_degrees,
+    uint32_t rgba);
+
+PV_API pv_status_t pv_qpdf_get_metadata(
+    const char* utf8_path,
+    const char* utf8_password,
+    pv_metadata_t* out_meta);
+
+PV_API pv_status_t pv_qpdf_set_metadata(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    const char* title_utf8,
+    const char* author_utf8,
+    const char* subject_utf8,
+    const char* keywords_utf8);
+
+PV_API void pv_free_metadata(pv_metadata_t* meta);
 
 /* Rendering (writes BGRA32 pixels into caller-allocated buffer of size >= stride_bytes * height_px) */
 PV_API pv_status_t pv_page_render_bgra(

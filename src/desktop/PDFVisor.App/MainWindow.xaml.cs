@@ -21,6 +21,11 @@ public partial class MainWindow : Window
     private UpdateInfo? _pendingUpdate;
     private bool _isUpdatingControls;
     private bool _isSidebarOpen = true;
+    private bool _isFullscreen;
+    private WindowStyle _prevWindowStyle;
+    private WindowState _prevWindowState;
+    private Point _thumbDragStart;
+    private int _thumbDragIndex = -1;
 
     public MainWindow()
     {
@@ -300,14 +305,15 @@ public partial class MainWindow : Window
         bool multiPage = hasDoc && session!.PageCount > 1;
 
         WorkspaceContainer.Visibility = hasDoc ? Visibility.Visible : Visibility.Collapsed;
-        ToolbarBorder.Visibility = hasDoc ? Visibility.Visible : Visibility.Collapsed;
-        TabStripBorder.Visibility = _workspace.OpenSessions.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ToolbarBorder.Visibility = (hasDoc && !_isFullscreen) ? Visibility.Visible : Visibility.Collapsed;
+        TabStripBorder.Visibility = (_workspace.OpenSessions.Count > 0 && !_isFullscreen) ? Visibility.Visible : Visibility.Collapsed;
         WelcomeContainer.Visibility = hasDoc ? Visibility.Collapsed : Visibility.Visible;
 
         BtnSave.IsEnabled = hasDoc && session!.IsModified;
         MenuSave.IsEnabled = BtnSave.IsEnabled;
         MenuSaveAs.IsEnabled = hasDoc;
         MenuExportImage.IsEnabled = hasDoc;
+        MenuProperties.IsEnabled = hasDoc;
         MenuOptimize.IsEnabled = hasDoc;
         MenuPrint.IsEnabled = hasDoc;
         BtnPrint.IsEnabled = hasDoc;
@@ -328,15 +334,19 @@ public partial class MainWindow : Window
         MenuZoomOut.IsEnabled = hasDoc;
         MenuResetZoom.IsEnabled = hasDoc;
         MenuFitWidth.IsEnabled = hasDoc;
+        MenuTwoPage.IsEnabled = hasDoc;
         MenuDarkRead.IsEnabled = hasDoc;
 
         MenuRotatePage.IsEnabled = hasDoc;
         MenuMoveUp.IsEnabled = multiPage && session!.CurrentPageIndex > 0;
         MenuMoveDown.IsEnabled = multiPage && session!.CurrentPageIndex < session.PageCount - 1;
         MenuMergePdf.IsEnabled = hasDoc;
+        MenuSplitPdf.IsEnabled = multiPage;
         MenuExtractPage.IsEnabled = hasDoc;
         MenuDeletePage.IsEnabled = multiPage;
 
+        MenuWatermark.IsEnabled = hasDoc;
+        MenuComparePdf.IsEnabled = hasDoc;
         MenuOcrPage.IsEnabled = hasDoc;
         MenuOcrAll.IsEnabled = hasDoc;
         MenuSignPades.IsEnabled = hasDoc;
@@ -376,6 +386,7 @@ public partial class MainWindow : Window
                 StatusZoom.Text = session.ZoomPercentText;
                 BtnDarkRead.IsChecked = session.DarkReadingMode;
                 MenuDarkRead.IsChecked = session.DarkReadingMode;
+                MenuTwoPage.IsChecked = session.TwoPageMode;
 
                 if (PageList.SelectedIndex != session.CurrentPageIndex && session.CurrentPageIndex < PageList.Items.Count)
                 {
@@ -927,6 +938,168 @@ public partial class MainWindow : Window
             _boundSession.DarkReadingMode = MenuDarkRead.IsChecked;
     }
 
+    private void MenuTwoPage_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is not null)
+            _boundSession.TwoPageMode = MenuTwoPage.IsChecked;
+    }
+
+    private void MenuFullscreen_Click(object sender, RoutedEventArgs e) => ToggleFullscreen();
+
+    private void ToggleFullscreen()
+    {
+        _isFullscreen = !_isFullscreen;
+        MenuFullscreen.IsChecked = _isFullscreen;
+
+        if (_isFullscreen)
+        {
+            _prevWindowStyle = WindowStyle;
+            _prevWindowState = WindowState;
+            WindowStyle = WindowStyle.None;
+            WindowState = WindowState.Maximized;
+            MainMenuBar.Visibility = Visibility.Collapsed;
+            MainStatusBar.Visibility = Visibility.Collapsed;
+        }
+        else
+        {
+            WindowStyle = _prevWindowStyle;
+            WindowState = _prevWindowState;
+            MainMenuBar.Visibility = Visibility.Visible;
+            MainStatusBar.Visibility = Visibility.Visible;
+        }
+        UpdateUiState();
+    }
+
+    private void MenuProperties_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        try
+        {
+            var meta = _boundSession.GetMetadata();
+            var dlg = new DocumentPropertiesDialog(_boundSession.FilePath, _boundSession.PageCount, meta) { Owner = this };
+            if (dlg.ShowDialog() == true)
+            {
+                _boundSession.UpdateMetadata(dlg.MetaTitle, dlg.MetaAuthor, dlg.MetaSubject, dlg.MetaKeywords);
+                StatusMessage.Text = "Metadatos del documento actualizados";
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error al leer o guardar metadatos:\n{ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void MenuSplitPdf_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null || _boundSession.PageCount <= 1) return;
+        var dlg = new SplitPdfDialog(_boundSession.PageCount) { Owner = this };
+        if (dlg.ShowDialog() != true || dlg.SelectedGroups is null) return;
+
+        var folderDlg = new OpenFolderDialog { Title = "Seleccionar carpeta de destino para los PDFs divididos" };
+        if (folderDlg.ShowDialog(this) != true) return;
+
+        try
+        {
+            string baseName = System.IO.Path.GetFileNameWithoutExtension(_boundSession.FileName);
+            var files = _boundSession.SplitIntoFiles(dlg.SelectedGroups, folderDlg.FolderName, baseName);
+            StatusMessage.Text = $"Documento dividido en {files.Count} archivos";
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(folderDlg.FolderName) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error al dividir el documento:\n{ex.Message}", "Error al dividir",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void MenuWatermark_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        var dlg = new WatermarkDialog { Owner = this };
+        if (dlg.ShowDialog() != true) return;
+
+        try
+        {
+            if (dlg.ApplyWatermark)
+                _boundSession.ApplyWatermarkToAllPages(dlg.WatermarkText, dlg.WatermarkOpacity);
+            if (dlg.ApplyPageNumbers)
+                _boundSession.ApplyPageNumbersToAllPages(dlg.PageNumberFormat);
+            StatusMessage.Text = "Marca de agua / numeración aplicada";
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Error al aplicar marca de agua:\n{ex.Message}", "Error",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void MenuComparePdf_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        var dlg = new OpenFileDialog
+        {
+            Title = "Seleccionar segundo PDF para comparar",
+            Filter = "Documentos PDF (*.pdf)|*.pdf"
+        };
+        if (dlg.ShowDialog(this) != true) return;
+
+        try
+        {
+            var rightDoc = PdfDocument.Open(dlg.FileName);
+            var cmp = new ComparePdfDialog(_boundSession.Document, rightDoc, ownsRightDoc: true) { Owner = this };
+            cmp.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"No se pudo comparar el documento:\n{ex.Message}", "Error de comparación",
+                MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    // --- Thumbnail Drag & Drop Reordering ---
+    private void PageList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        _thumbDragStart = e.GetPosition(PageList);
+        _thumbDragIndex = GetThumbnailIndexAt(e.OriginalSource as DependencyObject);
+    }
+
+    private void PageList_PreviewMouseMove(object sender, MouseEventArgs e)
+    {
+        if (e.LeftButton != MouseButtonState.Pressed || _thumbDragIndex < 0 || _boundSession is null || _boundSession.PageCount <= 1)
+            return;
+        Point current = e.GetPosition(PageList);
+        if (Math.Abs(current.X - _thumbDragStart.X) > SystemParameters.MinimumHorizontalDragDistance ||
+            Math.Abs(current.Y - _thumbDragStart.Y) > SystemParameters.MinimumVerticalDragDistance)
+        {
+            int idx = _thumbDragIndex;
+            _thumbDragIndex = -1;
+            DragDrop.DoDragDrop(PageList, new DataObject("PDFVisor.PageIndex", idx), DragDropEffects.Move);
+        }
+    }
+
+    private void PageList_Drop(object sender, DragEventArgs e)
+    {
+        if (_boundSession is null || !e.Data.GetDataPresent("PDFVisor.PageIndex")) return;
+        int fromIdx = (int)e.Data.GetData("PDFVisor.PageIndex");
+        int toIdx = GetThumbnailIndexAt(e.OriginalSource as DependencyObject);
+        if (toIdx >= 0 && fromIdx != toIdx)
+        {
+            _boundSession.MovePage(fromIdx, toIdx);
+            StatusMessage.Text = $"Página {fromIdx + 1} movida a la posición {toIdx + 1}";
+        }
+        e.Handled = true;
+    }
+
+    private int GetThumbnailIndexAt(DependencyObject? source)
+    {
+        while (source is not null && source is not ListBoxItem)
+            source = VisualTreeHelper.GetParent(source);
+        if (source is ListBoxItem item && item.DataContext is PageItemViewModel vm)
+            return vm.PageIndex;
+        return -1;
+    }
+
     // --- Edit, History, Pages ---
     private void BtnUndo_Click(object sender, RoutedEventArgs e) => _boundSession?.Undo();
     private void BtnRedo_Click(object sender, RoutedEventArgs e) => _boundSession?.Redo();
@@ -1396,6 +1569,7 @@ public partial class MainWindow : Window
         {
             if (e.Key == Key.O) { BtnOpen_Click(sender, e); e.Handled = true; }
             else if (e.Key == Key.S) { BtnSave_Click(sender, e); e.Handled = true; }
+            else if (e.Key == Key.D) { MenuProperties_Click(sender, e); e.Handled = true; }
             else if (e.Key == Key.P) { BtnPrint_Click(sender, e); e.Handled = true; }
             else if (e.Key == Key.F) { BtnToggleSearch_Click(sender, e); e.Handled = true; }
             else if (e.Key == Key.W && _boundSession is not null) { TryCloseSession(_boundSession); e.Handled = true; }
@@ -1405,6 +1579,16 @@ public partial class MainWindow : Window
             else if (e.Key is Key.Add or Key.OemPlus) { BtnZoomIn_Click(sender, e); e.Handled = true; }
             else if (e.Key is Key.Subtract or Key.OemMinus) { BtnZoomOut_Click(sender, e); e.Handled = true; }
             else if (e.Key is Key.D0 or Key.NumPad0) { BtnResetZoom_Click(sender, e); e.Handled = true; }
+        }
+        else if (e.Key == Key.F11)
+        {
+            ToggleFullscreen();
+            e.Handled = true;
+        }
+        else if (e.Key == Key.Escape && _isFullscreen)
+        {
+            ToggleFullscreen();
+            e.Handled = true;
         }
         else if (e.Key == Key.Escape && FloatingSearchBar.Visibility == Visibility.Visible)
         {

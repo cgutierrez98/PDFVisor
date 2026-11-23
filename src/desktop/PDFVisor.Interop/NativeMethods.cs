@@ -120,6 +120,27 @@ public sealed record PdfPageObjectInfo(
 }
 
 [StructLayout(LayoutKind.Sequential)]
+internal struct PvMetadataNative
+{
+    public nint TitleUtf8;
+    public nint AuthorUtf8;
+    public nint SubjectUtf8;
+    public nint KeywordsUtf8;
+    public nint PdfVersionUtf8;
+    public int IsEncrypted;
+    public int IsLinearized;
+}
+
+public sealed record PdfMetadata(
+    string Title,
+    string Author,
+    string Subject,
+    string Keywords,
+    string PdfVersion,
+    bool IsEncrypted,
+    bool IsLinearized);
+
+[StructLayout(LayoutKind.Sequential)]
 public struct PvRenderOptions
 {
     public int WidthPx;
@@ -439,6 +460,37 @@ internal static class NativeMethods
         double yPt,
         uint rgba,
         out int outObjIndex);
+
+    /* v1.2: Rotated Watermarks & Metadata */
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_add_rotated_text(
+        nint doc,
+        int pageIndex,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Text,
+        float fontSize,
+        double xPt,
+        double yPt,
+        double angleDegrees,
+        uint rgba);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_qpdf_get_metadata(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string utf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? utf8Password,
+        out PvMetadataNative outMeta);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_qpdf_set_metadata(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? titleUtf8,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? authorUtf8,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? subjectUtf8,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? keywordsUtf8);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void pv_free_metadata(ref PvMetadataNative meta);
 
     /* Rendering & Text */
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]

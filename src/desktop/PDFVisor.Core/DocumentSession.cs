@@ -66,6 +66,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     private bool _isModified;
     private int _documentRevision;
     private bool _darkReadingMode;
+    private bool _twoPageMode;
     private AnnotationTool _activeTool = AnnotationTool.None;
     private uint _activeColorRgba = 0xE53935FF;
     private float _activeFontSize = 14f;
@@ -158,6 +159,12 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         get => _darkReadingMode;
         set => SetProperty(ref _darkReadingMode, value);
+    }
+
+    public bool TwoPageMode
+    {
+        get => _twoPageMode;
+        set => SetProperty(ref _twoPageMode, value);
     }
 
     /// <summary>
@@ -444,11 +451,83 @@ public sealed class DocumentSession : ObservableObject, IDisposable
 
     public void MoveCurrentPage(int targetIndex)
     {
+        MovePage(CurrentPageIndex, targetIndex);
+    }
+
+    public void MovePage(int fromIndex, int toIndex)
+    {
         if (PageCount <= 1) return;
-        int clamped = Math.Clamp(targetIndex, 0, PageCount - 1);
-        if (clamped == CurrentPageIndex) return;
-        History.Execute(new MovePageCommand(_document, CurrentPageIndex, clamped));
-        OnDocumentMutated(clamped);
+        int src = Math.Clamp(fromIndex, 0, PageCount - 1);
+        int dst = Math.Clamp(toIndex, 0, PageCount - 1);
+        if (src == dst) return;
+        History.Execute(new MovePageCommand(_document, src, dst));
+        OnDocumentMutated(dst);
+    }
+
+    public IReadOnlyList<string> SplitIntoFiles(IReadOnlyList<int[]> pageGroups, string outputDirectory, string baseName)
+    {
+        Directory.CreateDirectory(outputDirectory);
+        var created = new List<string>(pageGroups.Count);
+        for (int i = 0; i < pageGroups.Count; i++)
+        {
+            string outPath = Path.Combine(outputDirectory, $"{baseName}_parte_{i + 1:D2}.pdf");
+            _document.ExtractPages(pageGroups[i], outPath);
+            created.Add(outPath);
+        }
+        return created;
+    }
+
+    public void ApplyWatermarkToAllPages(string text, byte opacity = 55, float fontSize = 54f, double angleDegrees = 45.0)
+    {
+        if (PageCount == 0 || string.IsNullOrWhiteSpace(text)) return;
+        uint rgba = (0x80808000u) | opacity;
+        for (int i = 0; i < PageCount; i++)
+        {
+            var size = _document.GetPageSize(i);
+            double x = size.WidthPt * 0.18;
+            double y = size.HeightPt * 0.30;
+            _document.AddRotatedText(i, text, fontSize, x, y, angleDegrees, rgba);
+        }
+        OnDocumentMutated(CurrentPageIndex);
+    }
+
+    public void ApplyPageNumbersToAllPages(string format = "Página {page} de {total}", float fontSize = 10f)
+    {
+        if (PageCount == 0) return;
+        int total = PageCount;
+        for (int i = 0; i < total; i++)
+        {
+            var size = _document.GetPageSize(i);
+            string label = format
+                .Replace("{page}", (i + 1).ToString())
+                .Replace("{total}", total.ToString());
+            double x = Math.Max(36, (size.WidthPt - label.Length * fontSize * 0.5) * 0.5);
+            double y = 24.0;
+            _document.AddTextObject(i, label, "Helvetica", fontSize, x, y, 0x444444FF);
+        }
+        OnDocumentMutated(CurrentPageIndex);
+    }
+
+    public PdfMetadata GetMetadata()
+    {
+        return QpdfTools.GetMetadata(_document.FilePath, _document.Password);
+    }
+
+    public void UpdateMetadata(string title, string author, string subject, string keywords)
+    {
+        string tempSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_meta_src_{Guid.NewGuid():N}.pdf");
+        string tempOut = Path.Combine(Path.GetTempPath(), $"pdfvisor_meta_out_{Guid.NewGuid():N}.pdf");
+        try
+        {
+            _document.SaveAs(tempSrc, incremental: false);
+            QpdfTools.SetMetadata(tempSrc, tempOut, title, author, subject, keywords);
+            ApplyExternalPdfAndReload(tempOut);
+        }
+        finally
+        {
+            if (File.Exists(tempSrc)) try { File.Delete(tempSrc); } catch { }
+            if (File.Exists(tempOut)) try { File.Delete(tempOut); } catch { }
+        }
     }
 
     public void DeleteCurrentPage()

@@ -14,7 +14,7 @@
     <DockPanel LastChildFill="True">
 
         <!-- 1. Classic Native Menu Bar -->
-        <Menu DockPanel.Dock="Top" Padding="6,2">
+        <Menu x:Name="MainMenuBar" DockPanel.Dock="Top" Padding="6,2">
             <MenuItem Header="_Archivo">
                 <MenuItem Header="_Abrir..." InputGestureText="Ctrl+O" Click="BtnOpen_Click"/>
                 <MenuItem Header="Crear PDF desde _imágenes..." Click="MenuCreateFromImages_Click"/>
@@ -23,6 +23,7 @@
                 <MenuItem x:Name="MenuSaveAs" Header="Guardar _como..." InputGestureText="Ctrl+Shift+S" Click="BtnSaveAs_Click"/>
                 <MenuItem x:Name="MenuExportImage" Header="_Exportar página como imagen..." Click="MenuExportImage_Click"/>
                 <Separator/>
+                <MenuItem x:Name="MenuProperties" Header="Propiedades y _metadatos..." InputGestureText="Ctrl+D" Click="MenuProperties_Click"/>
                 <MenuItem x:Name="MenuOptimize" Header="_Optimizar tamaño y carga rápida..." Click="BtnOptimize_Click"/>
                 <MenuItem x:Name="MenuPrint" Header="_Imprimir..." InputGestureText="Ctrl+P" Click="BtnPrint_Click"/>
                 <Separator/>
@@ -47,7 +48,9 @@
                 <MenuItem x:Name="MenuResetZoom" Header="Tamaño _real (100%)" InputGestureText="Ctrl+0" Click="BtnResetZoom_Click"/>
                 <MenuItem x:Name="MenuFitWidth" Header="Ajustar al _ancho" Click="BtnFitWidth_Click"/>
                 <Separator/>
+                <MenuItem x:Name="MenuTwoPage" Header="Vista a _doble página (Modo libro)" IsCheckable="True" Click="MenuTwoPage_Click"/>
                 <MenuItem x:Name="MenuDarkRead" Header="Modo _lectura oscuro" IsCheckable="True" Click="MenuDarkRead_Click"/>
+                <MenuItem x:Name="MenuFullscreen" Header="_Pantalla completa" InputGestureText="F11" IsCheckable="True" Click="MenuFullscreen_Click"/>
             </MenuItem>
 
             <MenuItem Header="_Páginas">
@@ -56,11 +59,15 @@
                 <MenuItem x:Name="MenuMoveDown" Header="Mover página a_bajo" Click="BtnMoveDown_Click"/>
                 <Separator/>
                 <MenuItem x:Name="MenuMergePdf" Header="_Unir con otro PDF..." Click="BtnMergePdf_Click"/>
+                <MenuItem x:Name="MenuSplitPdf" Header="_Dividir PDF..." Click="MenuSplitPdf_Click"/>
                 <MenuItem x:Name="MenuExtractPage" Header="_Extraer página actual..." Click="BtnExtractPage_Click"/>
                 <MenuItem x:Name="MenuDeletePage" Header="E_liminar página actual" Click="BtnDeletePage_Click"/>
             </MenuItem>
 
             <MenuItem Header="_Herramientas">
+                <MenuItem x:Name="MenuWatermark" Header="_Marca de agua y numeración..." Click="MenuWatermark_Click"/>
+                <MenuItem x:Name="MenuComparePdf" Header="_Comparar con otro PDF..." Click="MenuComparePdf_Click"/>
+                <Separator/>
                 <MenuItem x:Name="MenuOcrPage" Header="Reconocer texto (_OCR) en página actual" Click="BtnOcrPage_Click"/>
                 <MenuItem x:Name="MenuOcrAll" Header="Reconocer texto (OCR) en _todo el documento" Click="BtnOcrAll_Click"/>
             </MenuItem>
@@ -258,7 +265,7 @@
         </Border>
 
         <!-- 4. Clean, Minimal Status Bar -->
-        <StatusBar DockPanel.Dock="Bottom" Padding="10,2">
+        <StatusBar x:Name="MainStatusBar" DockPanel.Dock="Bottom" Padding="10,2">
             <StatusBarItem>
                 <TextBlock x:Name="StatusMessage" Text="Listo" FontSize="12" Opacity="0.82"/>
             </StatusBarItem>
@@ -305,8 +312,12 @@
                         </DockPanel>
 
                         <Grid>
-                            <!-- Panel 0: Thumbnails -->
+                            <!-- Panel 0: Thumbnails (with Drag & Drop reordering) -->
                             <ListBox x:Name="PageList"
+                                     AllowDrop="True"
+                                     PreviewMouseLeftButtonDown="PageList_PreviewMouseLeftButtonDown"
+                                     PreviewMouseMove="PageList_PreviewMouseMove"
+                                     Drop="PageList_Drop"
                                      SelectionChanged="PageList_SelectionChanged"
                                      BorderThickness="0"
                                      Background="Transparent"

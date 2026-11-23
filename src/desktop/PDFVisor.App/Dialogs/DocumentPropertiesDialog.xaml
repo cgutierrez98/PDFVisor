@@ -1,0 +1,57 @@
+<Window x:Class="PDFVisor.App.Dialogs.DocumentPropertiesDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Propiedades del documento"
+        Width="480"
+        SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+    <StackPanel Margin="20">
+        <TextBlock Text="Información del archivo" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
+        <Border BorderBrush="#28888888" BorderThickness="1" CornerRadius="6" Padding="12" Margin="0,0,0,14">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="120"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="24"/>
+                    <RowDefinition Height="24"/>
+                    <RowDefinition Height="24"/>
+                    <RowDefinition Height="24"/>
+                </Grid.RowDefinitions>
+                <TextBlock Grid.Row="0" Grid.Column="0" Text="Archivo:" Opacity="0.7"/>
+                <TextBlock Grid.Row="0" Grid.Column="1" x:Name="TxtFileName" FontWeight="Medium" TextTrimming="CharacterEllipsis"/>
+                <TextBlock Grid.Row="1" Grid.Column="0" Text="Versión PDF:" Opacity="0.7"/>
+                <TextBlock Grid.Row="1" Grid.Column="1" x:Name="TxtPdfVersion"/>
+                <TextBlock Grid.Row="2" Grid.Column="0" Text="Páginas / Tamaño:" Opacity="0.7"/>
+                <TextBlock Grid.Row="2" Grid.Column="1" x:Name="TxtPagesSize"/>
+                <TextBlock Grid.Row="3" Grid.Column="0" Text="Estado:" Opacity="0.7"/>
+                <TextBlock Grid.Row="3" Grid.Column="1" x:Name="TxtSecurityState"/>
+            </Grid>
+        </Border>
+
+        <TextBlock Text="Metadatos editables" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
+        <TextBlock Text="Título:" FontSize="12" Margin="0,0,0,3"/>
+        <TextBox x:Name="TxtTitle" Padding="8,5" Margin="0,0,0,8"/>
+
+        <TextBlock Text="Autor:" FontSize="12" Margin="0,0,0,3"/>
+        <TextBox x:Name="TxtAuthor" Padding="8,5" Margin="0,0,0,8"/>
+
+        <TextBlock Text="Asunto:" FontSize="12" Margin="0,0,0,3"/>
+        <TextBox x:Name="TxtSubject" Padding="8,5" Margin="0,0,0,8"/>
+
+        <TextBlock Text="Palabras clave:" FontSize="12" Margin="0,0,0,3"/>
+        <TextBox x:Name="TxtKeywords" Padding="8,5" Margin="0,0,0,16"/>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Guardar metadatos"
+                    IsDefault="True"
+                    Click="BtnSave_Click"
+                    Style="{StaticResource PrimaryAccentButton}"
+                    Padding="16,6" FontSize="13" Margin="0,0,8,0"/>
+            <Button Content="Cerrar" IsCancel="True" Style="{StaticResource SecondaryButton}"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

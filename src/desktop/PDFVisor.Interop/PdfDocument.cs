@@ -595,6 +595,15 @@ public sealed class PdfDocument : IDisposable
         return idx;
     }
 
+    public void AddRotatedText(int pageIndex, string text, float fontSize, double xPt, double yPt, double angleDegrees, uint rgba)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        ArgumentException.ThrowIfNullOrEmpty(text);
+        var status = NativeMethods.pv_page_add_rotated_text(
+            _handle.DangerousGetHandle(), pageIndex, text, fontSize, xPt, yPt, angleDegrees, rgba);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
     public void Dispose()
     {
         _handle.Dispose();

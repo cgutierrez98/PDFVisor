@@ -25,6 +25,7 @@ public sealed class PdfPageViewport : ContentControl
     private readonly struct PageLayoutSlot
     {
         public int PageIndex { get; init; }
+        public double LeftDip { get; init; }
         public double TopDip { get; init; }
         public double WidthDip { get; init; }
         public double HeightDip { get; init; }
@@ -191,7 +192,8 @@ public sealed class PdfPageViewport : ContentControl
         if (e.PropertyName is nameof(DocumentSession.Zoom)
             or nameof(DocumentSession.Rotation)
             or nameof(DocumentSession.DocumentRevision)
-            or nameof(DocumentSession.DarkReadingMode))
+            or nameof(DocumentSession.DarkReadingMode)
+            or nameof(DocumentSession.TwoPageMode))
         {
             int anchorPage = Session.CurrentPageIndex;
             if (e.PropertyName is nameof(DocumentSession.DocumentRevision) or nameof(DocumentSession.DarkReadingMode))
@@ -280,20 +282,82 @@ public sealed class PdfPageViewport : ContentControl
         double y = OuterPaddingDip;
         double maxW = 0;
 
-        for (int i = 0; i < count; i++)
+        if (session.TwoPageMode && count > 1)
         {
-            var p = session.Pages[i];
-            double wDip = (swapped ? p.HeightPt : p.WidthPt) * scale;
-            double hDip = (swapped ? p.WidthPt : p.HeightPt) * scale;
-            _layoutSlots[i] = new PageLayoutSlot
+            const double spreadGap = 16.0;
+            // First compute max row width so every spread is centered cleanly
+            for (int i = 0; i < count; i += 2)
             {
-                PageIndex = i,
-                TopDip = y,
-                WidthDip = wDip,
-                HeightDip = hDip
-            };
-            if (wDip > maxW) maxW = wDip;
-            y += hDip + PageGapDip;
+                var p1 = session.Pages[i];
+                double w1 = (swapped ? p1.HeightPt : p1.WidthPt) * scale;
+                double rowW = w1;
+                if (i + 1 < count)
+                {
+                    var p2 = session.Pages[i + 1];
+                    rowW += spreadGap + (swapped ? p2.HeightPt : p2.WidthPt) * scale;
+                }
+                if (rowW > maxW) maxW = rowW;
+            }
+
+            double canvasW = maxW + OuterPaddingDip * 2;
+            for (int i = 0; i < count; i += 2)
+            {
+                var p1 = session.Pages[i];
+                double w1 = (swapped ? p1.HeightPt : p1.WidthPt) * scale;
+                double h1 = (swapped ? p1.WidthPt : p1.HeightPt) * scale;
+
+                if (i + 1 < count)
+                {
+                    var p2 = session.Pages[i + 1];
+                    double w2 = (swapped ? p2.HeightPt : p2.WidthPt) * scale;
+                    double h2 = (swapped ? p2.WidthPt : p2.HeightPt) * scale;
+                    double rowW = w1 + spreadGap + w2;
+                    double startX = Math.Max(OuterPaddingDip, (canvasW - rowW) * 0.5);
+                    double rowH = Math.Max(h1, h2);
+
+                    _layoutSlots[i] = new PageLayoutSlot { PageIndex = i, LeftDip = startX, TopDip = y, WidthDip = w1, HeightDip = h1 };
+                    _layoutSlots[i + 1] = new PageLayoutSlot { PageIndex = i + 1, LeftDip = startX + w1 + spreadGap, TopDip = y, WidthDip = w2, HeightDip = h2 };
+                    y += rowH + PageGapDip;
+                }
+                else
+                {
+                    double startX = Math.Max(OuterPaddingDip, (canvasW - w1) * 0.5);
+                    _layoutSlots[i] = new PageLayoutSlot { PageIndex = i, LeftDip = startX, TopDip = y, WidthDip = w1, HeightDip = h1 };
+                    y += h1 + PageGapDip;
+                }
+            }
+        }
+        else
+        {
+            for (int i = 0; i < count; i++)
+            {
+                var p = session.Pages[i];
+                double wDip = (swapped ? p.HeightPt : p.WidthPt) * scale;
+                double hDip = (swapped ? p.WidthPt : p.HeightPt) * scale;
+                if (wDip > maxW) maxW = wDip;
+                _layoutSlots[i] = new PageLayoutSlot
+                {
+                    PageIndex = i,
+                    LeftDip = -1, // centered below
+                    TopDip = y,
+                    WidthDip = wDip,
+                    HeightDip = hDip
+                };
+                y += hDip + PageGapDip;
+            }
+            double canvasW = maxW + OuterPaddingDip * 2;
+            for (int i = 0; i < count; i++)
+            {
+                var s = _layoutSlots[i];
+                _layoutSlots[i] = new PageLayoutSlot
+                {
+                    PageIndex = s.PageIndex,
+                    LeftDip = Math.Max(OuterPaddingDip, (canvasW - s.WidthDip) * 0.5),
+                    TopDip = s.TopDip,
+                    WidthDip = s.WidthDip,
+                    HeightDip = s.HeightDip
+                };
+            }
         }
 
         _maxPageWidthDip = maxW;
@@ -414,7 +478,7 @@ public sealed class PdfPageViewport : ContentControl
             }
         };
 
-        double leftDip = Math.Max(OuterPaddingDip, (canvasWidth - slot.WidthDip) * 0.5);
+        double leftDip = slot.LeftDip >= 0 ? slot.LeftDip : Math.Max(OuterPaddingDip, (canvasWidth - slot.WidthDip) * 0.5);
         Canvas.SetLeft(border, leftDip);
         Canvas.SetTop(border, slot.TopDip);
 

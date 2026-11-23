@@ -588,4 +588,98 @@ PV_API pv_status_t pv_qpdf_sanitize_metadata(
     }
 }
 
+PV_API pv_status_t pv_qpdf_get_metadata(
+    const char* utf8_path,
+    const char* utf8_password,
+    pv_metadata_t* out_meta) {
+    if (!utf8_path || *utf8_path == '\0' || !out_meta) {
+        pv_internal::set_last_error("Invalid arguments to pv_qpdf_get_metadata");
+        return PV_ERR_INVALID_ARG;
+    }
+    std::memset(out_meta, 0, sizeof(pv_metadata_t));
+
+    try {
+        QPDF pdf;
+        pdf.processFile(utf8_path, utf8_password ? utf8_password : "");
+        out_meta->pdf_version_utf8 = dup_cstr(pdf.getPDFVersion());
+        out_meta->is_encrypted = pdf.isEncrypted() ? 1 : 0;
+        out_meta->is_linearized = pdf.isLinearized() ? 1 : 0;
+
+        auto read_info_str = [&](const char* key) -> char* {
+            auto trailer = pdf.getTrailer();
+            if (!trailer.hasKey("/Info")) return dup_cstr("");
+            auto info = trailer.getKey("/Info");
+            if (!info.isDictionary() || !info.hasKey(key)) return dup_cstr("");
+            auto val = info.getKey(key);
+            if (!val.isString()) return dup_cstr("");
+            return dup_cstr(val.getUTF8Value());
+        };
+
+        out_meta->title_utf8 = read_info_str("/Title");
+        out_meta->author_utf8 = read_info_str("/Author");
+        out_meta->subject_utf8 = read_info_str("/Subject");
+        out_meta->keywords_utf8 = read_info_str("/Keywords");
+        return PV_OK;
+    } catch (const std::exception& ex) {
+        pv_internal::set_last_error(std::string("QPDF get metadata failed: ") + ex.what());
+        return PV_ERR_QPDF_FAILED;
+    }
+}
+
+PV_API pv_status_t pv_qpdf_set_metadata(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    const char* title_utf8,
+    const char* author_utf8,
+    const char* subject_utf8,
+    const char* keywords_utf8) {
+    if (!src_utf8_path || !dest_utf8_path) {
+        pv_internal::set_last_error("Invalid arguments to pv_qpdf_set_metadata");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    try {
+        QPDF pdf;
+        pdf.processFile(src_utf8_path, src_utf8_password ? src_utf8_password : "");
+
+        auto trailer = pdf.getTrailer();
+        QPDFObjectHandle info;
+        if (trailer.hasKey("/Info") && trailer.getKey("/Info").isDictionary()) {
+            info = trailer.getKey("/Info");
+        } else {
+            info = pdf.makeIndirectObject(QPDFObjectHandle::newDictionary());
+            trailer.replaceKey("/Info", info);
+        }
+
+        auto set_key = [&](const char* key, const char* val) {
+            if (val && *val != '\0') info.replaceKey(key, QPDFObjectHandle::newUnicodeString(val));
+            else if (info.hasKey(key)) info.removeKey(key);
+        };
+
+        set_key("/Title", title_utf8);
+        set_key("/Author", author_utf8);
+        set_key("/Subject", subject_utf8);
+        set_key("/Keywords", keywords_utf8);
+
+        QPDFWriter writer(pdf, dest_utf8_path);
+        writer.setCompressStreams(true);
+        writer.write();
+        return PV_OK;
+    } catch (const std::exception& ex) {
+        pv_internal::set_last_error(std::string("QPDF set metadata failed: ") + ex.what());
+        return PV_ERR_QPDF_FAILED;
+    }
+}
+
+PV_API void pv_free_metadata(pv_metadata_t* meta) {
+    if (!meta) return;
+    std::free(meta->title_utf8);
+    std::free(meta->author_utf8);
+    std::free(meta->subject_utf8);
+    std::free(meta->keywords_utf8);
+    std::free(meta->pdf_version_utf8);
+    std::memset(meta, 0, sizeof(pv_metadata_t));
+}
+
 } // extern "C"

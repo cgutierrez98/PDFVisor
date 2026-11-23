@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -1820,6 +1821,63 @@ PV_API pv_status_t pv_page_add_unicode_text_object(
         return PV_ERR_EDIT_FAILED;
     }
     if (out_obj_index) *out_obj_index = idx;
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_add_rotated_text(
+    pv_document_handle doc,
+    int32_t page_index,
+    const char* utf8_text,
+    float font_size,
+    double x_pt,
+    double y_pt,
+    double angle_degrees,
+    uint32_t rgba) {
+    if (!doc || !doc->raw || page_index < 0 || !utf8_text || *utf8_text == '\0' || font_size <= 0.0f) {
+        set_last_error("Invalid arguments to pv_page_add_rotated_text");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    auto utf16 = utf8_to_utf16(utf8_text);
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    FPDF_PAGEOBJECT text_obj = FPDFPageObj_NewTextObj(doc->raw, "Helvetica-Bold", font_size);
+    if (!text_obj) {
+        FPDF_ClosePage(page);
+        set_last_error("Failed to create watermark text object");
+        return PV_ERR_EDIT_FAILED;
+    }
+
+    if (!FPDFText_SetText(text_obj, utf16.data())) {
+        FPDFPageObj_Destroy(text_obj);
+        FPDF_ClosePage(page);
+        set_last_error("FPDFText_SetText failed for watermark");
+        return PV_ERR_EDIT_FAILED;
+    }
+
+    unsigned int r, g, b, a;
+    unpack_rgba(rgba, r, g, b, a);
+    FPDFPageObj_SetFillColor(text_obj, r, g, b, a);
+
+    double rad = angle_degrees * 3.14159265358979323846 / 180.0;
+    double c = std::cos(rad);
+    double s = std::sin(rad);
+    FPDFPageObj_Transform(text_obj, c, s, -s, c, x_pt, y_pt);
+
+    FPDFPage_InsertObject(page, text_obj);
+    FPDF_BOOL ok = FPDFPage_GenerateContent(page);
+    FPDF_ClosePage(page);
+
+    if (!ok) {
+        set_last_error("Failed to regenerate content after adding rotated text");
+        return PV_ERR_EDIT_FAILED;
+    }
     return PV_OK;
 }
 
