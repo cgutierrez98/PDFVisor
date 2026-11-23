@@ -30,7 +30,7 @@
                         Padding="18,6"
                         FontSize="13"
                         Margin="0,0,8,0"/>
-                <Button Content="Cancelar" IsCancel="True" Padding="18,6"/>
+                <Button Content="Cancelar" IsCancel="True" Style="{StaticResource SecondaryButton}" Padding="16,6"/>
             </StackPanel>
         </StackPanel>
 

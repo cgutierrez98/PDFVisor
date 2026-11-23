@@ -121,15 +121,19 @@
                     <Button x:Name="BtnRotatePage" Style="{StaticResource IconToolbarButton}" Content="&#xE7AD;" Click="BtnRotatePage_Click" ToolTip="Rotar página 90°"/>
                 </StackPanel>
 
-                <!-- Right: Tools & View Actions -->
+                <!-- Right: Segmented Tools Pill & View Actions -->
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                    <ToggleButton x:Name="ToolSelect" Style="{StaticResource ToolToggleButton}" Content="&#xE7C9;" IsChecked="True" Click="ToolButton_Click" ToolTip="Seleccionar texto"/>
-                    <ToggleButton x:Name="ToolHighlight" Style="{StaticResource ToolToggleButton}" Content="&#xE7E6;" Click="ToolButton_Click" ToolTip="Resaltar"/>
-                    <ToggleButton x:Name="ToolSquare" Style="{StaticResource ToolToggleButton}" Content="&#xE739;" Click="ToolButton_Click" ToolTip="Dibujar rectángulo"/>
-                    <ToggleButton x:Name="ToolNote" Style="{StaticResource ToolToggleButton}" Content="&#xE70B;" Click="ToolButton_Click" ToolTip="Añadir nota adhesiva"/>
-                    <ToggleButton x:Name="ToolInk" Style="{StaticResource ToolToggleButton}" Content="&#xE76D;" Click="ToolButton_Click" ToolTip="Dibujo a mano alzada"/>
-                    <ToggleButton x:Name="ToolAddText" Style="{StaticResource ToolToggleButton}" Content="&#xE8D2;" Click="ToolButton_Click" ToolTip="Insertar texto"/>
-                    <ToggleButton x:Name="ToolRedact" Style="{StaticResource ToolToggleButton}" Content="&#xE72E;" Click="ToolButton_Click" ToolTip="Censurar permanentemente"/>
+                    <Border Background="#10888888" BorderBrush="#22888888" BorderThickness="1" CornerRadius="6" Padding="2">
+                        <StackPanel Orientation="Horizontal">
+                            <ToggleButton x:Name="ToolSelect" Style="{StaticResource ToolToggleButton}" Content="&#xE7C9;" IsChecked="True" Click="ToolButton_Click" ToolTip="Seleccionar texto"/>
+                            <ToggleButton x:Name="ToolHighlight" Style="{StaticResource ToolToggleButton}" Content="&#xE7E6;" Click="ToolButton_Click" ToolTip="Resaltar"/>
+                            <ToggleButton x:Name="ToolSquare" Style="{StaticResource ToolToggleButton}" Content="&#xE739;" Click="ToolButton_Click" ToolTip="Dibujar rectángulo"/>
+                            <ToggleButton x:Name="ToolNote" Style="{StaticResource ToolToggleButton}" Content="&#xE70B;" Click="ToolButton_Click" ToolTip="Añadir nota adhesiva"/>
+                            <ToggleButton x:Name="ToolInk" Style="{StaticResource ToolToggleButton}" Content="&#xE76D;" Click="ToolButton_Click" ToolTip="Dibujo a mano alzada"/>
+                            <ToggleButton x:Name="ToolAddText" Style="{StaticResource ToolToggleButton}" Content="&#xE8D2;" Click="ToolButton_Click" ToolTip="Insertar texto"/>
+                            <ToggleButton x:Name="ToolRedact" Style="{StaticResource ToolToggleButton}" Content="&#xE72E;" Click="ToolButton_Click" ToolTip="Censurar permanentemente"/>
+                        </StackPanel>
+                    </Border>
 
                     <Border Style="{StaticResource ToolbarDivider}"/>
 
@@ -275,10 +279,10 @@
                             <!-- Panel 2: Forms -->
                             <DockPanel x:Name="FormsPanel" Visibility="Collapsed">
                                 <Button DockPanel.Dock="Top"
+                                        Style="{StaticResource SecondaryButton}"
                                         Content="Añadir campo de texto"
                                         Click="BtnAddTextField_Click"
-                                        Margin="10,2,10,8"
-                                        Padding="10,5"/>
+                                        Margin="10,2,10,8"/>
                                 <ListBox x:Name="FormFieldList"
                                          MouseDoubleClick="FormFieldList_MouseDoubleClick"
                                          BorderThickness="0"
@@ -298,10 +302,10 @@
                             <!-- Panel 3: Signatures -->
                             <DockPanel x:Name="SignaturesPanel" Visibility="Collapsed">
                                 <Button DockPanel.Dock="Top"
+                                        Style="{StaticResource SecondaryButton}"
                                         Content="Firmar documento..."
                                         Click="BtnSignPades_Click"
-                                        Margin="10,2,10,8"
-                                        Padding="10,5"/>
+                                        Margin="10,2,10,8"/>
                                 <ListBox x:Name="SignatureList"
                                          BorderThickness="0"
                                          Background="Transparent"
