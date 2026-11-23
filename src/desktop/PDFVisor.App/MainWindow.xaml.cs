@@ -193,6 +193,7 @@ public partial class MainWindow : Window
         bool multiPage = hasDoc && session!.PageCount > 1;
 
         WorkspaceContainer.Visibility = hasDoc ? Visibility.Visible : Visibility.Collapsed;
+        ToolbarBorder.Visibility = hasDoc ? Visibility.Visible : Visibility.Collapsed;
         TabStripBorder.Visibility = _workspace.OpenSessions.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         WelcomeContainer.Visibility = hasDoc ? Visibility.Collapsed : Visibility.Visible;
 

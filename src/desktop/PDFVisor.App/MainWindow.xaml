@@ -70,8 +70,8 @@
             </MenuItem>
         </Menu>
 
-        <!-- 2. Clean Single-Row Fluent Icon Toolbar -->
-        <Border DockPanel.Dock="Top" BorderBrush="#22888888" BorderThickness="0,1,0,1" Padding="10,4">
+        <!-- 2. Clean Single-Row Fluent Icon Toolbar (shown when a document is open) -->
+        <Border x:Name="ToolbarBorder" DockPanel.Dock="Top" BorderBrush="#22888888" BorderThickness="0,1,0,1" Padding="10,4" Visibility="Collapsed">
             <DockPanel LastChildFill="False">
                 <!-- Left: File, History, Navigation, Zoom -->
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">

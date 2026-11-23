@@ -6,7 +6,7 @@
     <Application.Resources>
         <FontFamily x:Key="FluentIconsFont">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
 
-        <!-- Fluent Icon Toolbar Button (rounded hover/pressed, inherits Fluent dark/light foreground) -->
+        <!-- Fluent Icon Toolbar Button (rounded hover/pressed, uses WPF Fluent TextFillColorPrimaryBrush) -->
         <Style x:Key="IconToolbarButton" TargetType="Button">
             <Setter Property="FontFamily" Value="{StaticResource FluentIconsFont}"/>
             <Setter Property="FontSize" Value="15"/>
@@ -14,6 +14,7 @@
             <Setter Property="Height" Value="30"/>
             <Setter Property="Margin" Value="1,0"/>
             <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
             <Setter Property="Template">
@@ -50,6 +51,7 @@
             <Setter Property="Height" Value="28"/>
             <Setter Property="Margin" Value="1,0"/>
             <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
             <Setter Property="Template">
@@ -105,6 +107,7 @@
             <Setter Property="Height" Value="36"/>
             <Setter Property="Margin" Value="4,3"/>
             <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
             <Setter Property="Template">
@@ -186,6 +189,7 @@
         <Style x:Key="SecondaryButton" TargetType="Button">
             <Setter Property="Background" Value="#14888888"/>
             <Setter Property="BorderBrush" Value="#2E888888"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextFillColorPrimaryBrush}"/>
             <Setter Property="Padding" Value="14,6"/>
             <Setter Property="FontSize" Value="12.5"/>
             <Setter Property="FontWeight" Value="Medium"/>
