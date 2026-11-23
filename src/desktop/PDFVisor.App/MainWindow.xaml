@@ -357,7 +357,7 @@
                             CornerRadius="6"
                             BorderBrush="#44888888"
                             BorderThickness="1"
-                            Background="{DynamicResource {x:Static SystemColors.WindowBrushKey}}">
+                            Background="{Binding Background, RelativeSource={RelativeSource AncestorType=Window}}">
                         <Border.Effect>
                             <DropShadowEffect BlurRadius="16" ShadowDepth="3" Opacity="0.32" Color="Black"/>
                         </Border.Effect>
