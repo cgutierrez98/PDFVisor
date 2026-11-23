@@ -131,11 +131,28 @@ public partial class MainWindow : Window
         }
     }
 
+    private void CancelThumbnailGeneration()
+    {
+        var cts = _thumbCts;
+        _thumbCts = null;
+        if (cts is not null)
+        {
+            try { cts.Cancel(); } catch (ObjectDisposedException) { }
+            cts.Dispose();
+        }
+    }
+
     protected override void OnClosed(EventArgs e)
     {
         base.OnClosed(e);
-        _thumbCts?.Cancel();
-        _thumbCts?.Dispose();
+        _workspace.PropertyChanged -= Workspace_PropertyChanged;
+        if (_boundSession is not null)
+        {
+            _boundSession.PropertyChanged -= ActiveSession_PropertyChanged;
+            _boundSession.History.PropertyChanged -= ActiveSession_PropertyChanged;
+            _boundSession = null;
+        }
+        CancelThumbnailGeneration();
         _workspace.Dispose();
     }
 
@@ -181,7 +198,7 @@ public partial class MainWindow : Window
         }
         else
         {
-            _thumbCts?.Cancel();
+            CancelThumbnailGeneration();
             PageList.ItemsSource = null;
             BookmarkList.ItemsSource = null;
             FormFieldList.ItemsSource = null;
@@ -210,8 +227,7 @@ public partial class MainWindow : Window
 
     private async Task GenerateThumbnailsAsync(DocumentSession session)
     {
-        _thumbCts?.Cancel();
-        _thumbCts?.Dispose();
+        CancelThumbnailGeneration();
         _thumbCts = new CancellationTokenSource();
         var ct = _thumbCts.Token;
 
