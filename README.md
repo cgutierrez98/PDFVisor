@@ -89,7 +89,7 @@ flowchart TD
 
 2. **Compilar el motor nativo C++20 (`PDFVisor.Engine.dll`):**
    ```powershell
-   cmake -B build -G "Visual Studio 17 2022" -A x64
+   cmake -B build -A x64
    cmake --build build --config Release
    ```
 

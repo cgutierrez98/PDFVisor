@@ -47,10 +47,14 @@ jobs:
       - name: Build & Run Tests
         shell: pwsh
         run: |
-          cmake -B build -G "Visual Studio 17 2022" -A x64
+          cmake -B build -A x64
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build --config Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet build PDFVisor.slnx -c Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           dotnet test PDFVisor.slnx -c Release --no-build --verbosity normal
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Publish win-x64 Self-Contained Bundle
         shell: pwsh

@@ -16,7 +16,7 @@ if (-not (Test-Path "$RepoRoot\third_party\qpdf\qpdf-12.4.2-msvc64\bin\qpdf30.dl
 }
 
 Write-Host "=== 2. Building Native C++20 Engine (Release x64) ==="
-cmake -S "$RepoRoot" -B "$RepoRoot\build" -G "Visual Studio 17 2022" -A x64
+cmake -S "$RepoRoot" -B "$RepoRoot\build" -A x64
 if ($LASTEXITCODE -ne 0) { throw "CMake configure failed" }
 cmake --build "$RepoRoot\build" --config Release
 if ($LASTEXITCODE -ne 0) { throw "CMake build failed" }
