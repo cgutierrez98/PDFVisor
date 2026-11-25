@@ -326,7 +326,7 @@ PV_API void pv_engine_shutdown(void) {
 }
 
 PV_API const char* pv_engine_version(void) {
-    return "1.4.0";
+    return "1.5.0";
 }
 
 PV_API const char* pv_get_last_error(void) {
@@ -865,10 +865,11 @@ PV_API pv_status_t pv_page_add_note_annot(
 
     FS_RECTF fs_rect{left, top, right, bottom};
     FPDFAnnot_SetRect(annot, &fs_rect);
+    FPDFAnnot_SetFlags(annot, FPDF_ANNOT_FLAG_PRINT | FPDF_ANNOT_FLAG_NOZOOM | FPDF_ANNOT_FLAG_NOROTATE);
 
     unsigned int r, g, b, a;
     unpack_rgba(rgba, r, g, b, a);
-    FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, a);
+    FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, r, g, b, 255);
     FPDFAnnot_SetStringValue(annot, "Contents", contents_utf16.data());
 
     int idx = FPDFPage_GetAnnotCount(page) - 1;
@@ -1006,11 +1007,11 @@ PV_API pv_status_t pv_page_get_annotations(
             };
         }
 
-        unsigned int cr = 255, cg = 215, cb = 0, ca = 255;
+        unsigned int cr = 255, cg = 202, cb = 40, ca = 255;
         if (FPDFAnnot_GetColor(annot, FPDFANNOT_COLORTYPE_Color, &cr, &cg, &cb, &ca)) {
             arr[i].color_rgba = ((cr & 0xFFu) << 24) | ((cg & 0xFFu) << 16) | ((cb & 0xFFu) << 8) | (ca & 0xFFu);
         } else {
-            arr[i].color_rgba = 0xFFC107FFu;
+            arr[i].color_rgba = 0xFFCA28FFu;
         }
 
         unsigned long cbytes = FPDFAnnot_GetStringValue(annot, "Contents", nullptr, 0);
@@ -1278,6 +1279,25 @@ PV_API pv_status_t pv_page_render_tile_bgra(
     if (render_annotations) flags |= FPDF_ANNOT;
     if (lcd_text) flags |= FPDF_LCD_TEXT;
 
+    // Temporarily suppress FPDF_ANNOT_TEXT rasterization on screen tiles because PdfPageViewport renders
+    // crisp vector Sticky Note pins + expandable Post-it cards in their exact color and allows instant show/hide.
+    std::vector<std::pair<int, int>> saved_text_annot_flags;
+    if (render_annotations) {
+        int annot_count = FPDFPage_GetAnnotCount(page);
+        for (int i = 0; i < annot_count; ++i) {
+            FPDF_ANNOTATION a = FPDFPage_GetAnnot(page, i);
+            if (!a) continue;
+            if (FPDFAnnot_GetSubtype(a) == FPDF_ANNOT_TEXT) {
+                int orig_f = FPDFAnnot_GetFlags(a);
+                if ((orig_f & FPDF_ANNOT_FLAG_HIDDEN) == 0) {
+                    saved_text_annot_flags.emplace_back(i, orig_f);
+                    FPDFAnnot_SetFlags(a, orig_f | FPDF_ANNOT_FLAG_HIDDEN);
+                }
+            }
+            FPDFPage_CloseAnnot(a);
+        }
+    }
+
     FPDF_RenderPageBitmap(
         bitmap,
         page,
@@ -1287,6 +1307,14 @@ PV_API pv_status_t pv_page_render_tile_bgra(
         full_page_height_px,
         rotation,
         flags);
+
+    for (const auto& [idx, orig_f] : saved_text_annot_flags) {
+        FPDF_ANNOTATION a = FPDFPage_GetAnnot(page, idx);
+        if (a) {
+            FPDFAnnot_SetFlags(a, orig_f);
+            FPDFPage_CloseAnnot(a);
+        }
+    }
 
     if (render_annotations && doc->form_handle) {
         doc->active_page_index = page_index;
@@ -1630,10 +1658,42 @@ PV_API pv_status_t pv_page_get_objects(
         }
 
         if (type == FPDF_PAGEOBJ_TEXT) {
-            float fsize = 0.0f;
-            if (FPDFTextObj_GetFontSize(obj, &fsize)) {
-                arr[i].font_size = fsize;
+            float raw_fsize = 0.0f;
+            FPDFTextObj_GetFontSize(obj, &raw_fsize);
+            FS_MATRIX mat{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+            FPDFPageObj_GetMatrix(obj, &mat);
+            float scale_y = std::hypot(mat.c, mat.d);
+            if (scale_y <= 0.001f) scale_y = 1.0f;
+            arr[i].font_size = raw_fsize * scale_y;
+
+            unsigned int cr = 17, cg = 17, cb = 17, ca = 255;
+            if (FPDFPageObj_GetFillColor(obj, &cr, &cg, &cb, &ca)) {
+                arr[i].color_rgba = ((cr & 0xFFu) << 24) | ((cg & 0xFFu) << 16) | ((cb & 0xFFu) << 8) | (ca & 0xFFu);
+            } else {
+                arr[i].color_rgba = 0x111111FFu;
             }
+
+            int32_t obj_flags = 0;
+            if (FPDFTextObj_GetTextRenderMode(obj) == FPDF_TEXTRENDERMODE_INVISIBLE) {
+                obj_flags |= 2;
+            }
+            int mark_count = FPDFPageObj_CountMarks(obj);
+            for (int m = 0; m < mark_count; ++m) {
+                FPDF_PAGEOBJECTMARK mark = FPDFPageObj_GetMark(obj, static_cast<unsigned long>(m));
+                if (!mark) continue;
+                unsigned long name_len = 0;
+                if (FPDFPageObjMark_GetName(mark, nullptr, 0, &name_len) && name_len > 0) {
+                    std::vector<unsigned short> nbuf((name_len / 2) + 1, 0);
+                    if (FPDFPageObjMark_GetName(mark, nbuf.data(), name_len, &name_len)) {
+                        if (utf16_to_utf8(nbuf) == "PVText") {
+                            obj_flags |= 1;
+                            break;
+                        }
+                    }
+                }
+            }
+            arr[i].flags = obj_flags;
+
             if (text_page) {
                 unsigned long bytes = FPDFTextObj_GetText(obj, text_page, nullptr, 0);
                 if (bytes > 0) {
@@ -1691,6 +1751,172 @@ PV_API pv_status_t pv_page_edit_text_object(
 
     if (!ok) {
         set_last_error("Failed to edit text object or regenerate content");
+        return PV_ERR_EDIT_FAILED;
+    }
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_update_text_object(
+    pv_document_handle doc,
+    int32_t page_index,
+    int32_t obj_index,
+    const char* new_utf8_text_or_null,
+    const char* fallback_ttf_path_utf8_or_null,
+    float new_font_size_or_zero,
+    int32_t update_color,
+    uint32_t new_rgba,
+    double dx_pt,
+    double dy_pt) {
+    if (!doc || !doc->raw || page_index < 0 || obj_index < 0) {
+        set_last_error("Invalid arguments to pv_page_update_text_object");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::vector<uint8_t> fallback_font_data;
+    if (new_utf8_text_or_null && *new_utf8_text_or_null != '\0' &&
+        fallback_ttf_path_utf8_or_null && *fallback_ttf_path_utf8_or_null != '\0') {
+        std::ifstream ff(utf8_to_path(fallback_ttf_path_utf8_or_null), std::ios::binary);
+        if (ff.is_open()) {
+            fallback_font_data.assign((std::istreambuf_iterator<char>(ff)), std::istreambuf_iterator<char>());
+        }
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    FPDF_PAGEOBJECT obj = FPDFPage_GetObject(page, obj_index);
+    if (!obj || FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_TEXT) {
+        FPDF_ClosePage(page);
+        set_last_error("Object index is not a text object");
+        return PV_ERR_EDIT_FAILED;
+    }
+
+    float raw_fsize = 12.0f;
+    FPDFTextObj_GetFontSize(obj, &raw_fsize);
+    FS_MATRIX mat{1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
+    FPDFPageObj_GetMatrix(obj, &mat);
+    float scale_y = std::hypot(mat.c, mat.d);
+    if (scale_y <= 0.001f) scale_y = 1.0f;
+    float current_eff_size = std::max(1.0f, raw_fsize * scale_y);
+
+    unsigned int cur_r = 17, cur_g = 17, cur_b = 17, cur_a = 255;
+    FPDFPageObj_GetFillColor(obj, &cur_r, &cur_g, &cur_b, &cur_a);
+
+    bool had_pvtext_mark = false;
+    int mark_count = FPDFPageObj_CountMarks(obj);
+    for (int m = 0; m < mark_count; ++m) {
+        FPDF_PAGEOBJECTMARK mark = FPDFPageObj_GetMark(obj, static_cast<unsigned long>(m));
+        if (!mark) continue;
+        unsigned long name_len = 0;
+        if (FPDFPageObjMark_GetName(mark, nullptr, 0, &name_len) && name_len > 0) {
+            std::vector<unsigned short> nbuf((name_len / 2) + 1, 0);
+            if (FPDFPageObjMark_GetName(mark, nbuf.data(), name_len, &name_len) && utf16_to_utf8(nbuf) == "PVText") {
+                had_pvtext_mark = true;
+                break;
+            }
+        }
+    }
+
+    // 1. Update text string (with automatic TrueType CID font upgrade if original font lacks glyphs!)
+    if (new_utf8_text_or_null && *new_utf8_text_or_null != '\0') {
+        auto utf16 = utf8_to_utf16(new_utf8_text_or_null);
+        if (!FPDFText_SetText(obj, utf16.data())) {
+            if (fallback_font_data.empty()) {
+                FPDF_ClosePage(page);
+                set_last_error("FPDFText_SetText failed and no fallback TrueType font was available");
+                return PV_ERR_EDIT_FAILED;
+            }
+            FPDF_FONT cid_font = FPDFText_LoadFont(
+                doc->raw,
+                fallback_font_data.data(),
+                static_cast<uint32_t>(fallback_font_data.size()),
+                FPDF_FONT_TRUETYPE,
+                1);
+            if (!cid_font) {
+                FPDF_ClosePage(page);
+                set_last_error("Failed to load fallback TrueType font");
+                return PV_ERR_EDIT_FAILED;
+            }
+            float replacement_size = new_font_size_or_zero > 0.5f ? new_font_size_or_zero : current_eff_size;
+            FPDF_PAGEOBJECT new_obj = FPDFPageObj_CreateTextObj(doc->raw, cid_font, replacement_size);
+            FPDFFont_Close(cid_font);
+            if (!new_obj || !FPDFText_SetText(new_obj, utf16.data())) {
+                if (new_obj) FPDFPageObj_Destroy(new_obj);
+                FPDF_ClosePage(page);
+                set_last_error("Failed to create replacement Unicode text object");
+                return PV_ERR_EDIT_FAILED;
+            }
+            FPDFPageObj_SetFillColor(new_obj, cur_r, cur_g, cur_b, cur_a);
+            if (had_pvtext_mark) {
+                FPDFPageObj_AddMark(new_obj, "PVText");
+            }
+            // Preserve rotation direction from original matrix if rotated, with unit scale since font_size holds size
+            float dir_x = std::hypot(mat.a, mat.b);
+            float dir_y = std::hypot(mat.c, mat.d);
+            FS_MATRIX clean_mat{
+                dir_x > 0.001f ? (mat.a / dir_x) : 1.0f,
+                dir_x > 0.001f ? (mat.b / dir_x) : 0.0f,
+                dir_y > 0.001f ? (mat.c / dir_y) : 0.0f,
+                dir_y > 0.001f ? (mat.d / dir_y) : 1.0f,
+                mat.e,
+                mat.f
+            };
+            FPDFPageObj_SetMatrix(new_obj, &clean_mat);
+
+            if (!FPDFPage_RemoveObject(page, obj)) {
+                FPDFPageObj_Destroy(new_obj);
+                FPDF_ClosePage(page);
+                set_last_error("Failed to replace original text object");
+                return PV_ERR_EDIT_FAILED;
+            }
+            FPDFPageObj_Destroy(obj);
+            if (!FPDFPage_InsertObjectAtIndex(page, new_obj, static_cast<size_t>(obj_index))) {
+                FPDF_ClosePage(page);
+                set_last_error("Failed to insert replacement text object at index");
+                return PV_ERR_EDIT_FAILED;
+            }
+            obj = new_obj;
+            raw_fsize = replacement_size;
+            mat = clean_mat;
+            scale_y = 1.0f;
+            current_eff_size = replacement_size;
+        }
+    }
+
+    // 2. Update font size (handles both unscaled FPDFTextObj_SetFontSize and matrix-scaled text objects!)
+    if (new_font_size_or_zero > 0.5f && std::abs(new_font_size_or_zero - current_eff_size) > 0.05f) {
+        if (std::abs(scale_y - 1.0f) < 0.02f && raw_fsize > 1.5f) {
+            FPDFTextObj_SetFontSize(obj, new_font_size_or_zero);
+        } else {
+            float ratio = new_font_size_or_zero / current_eff_size;
+            mat.a *= ratio;
+            mat.b *= ratio;
+            mat.c *= ratio;
+            mat.d *= ratio;
+            FPDFPageObj_SetMatrix(obj, &mat);
+        }
+    }
+
+    // 3. Update fill color
+    if (update_color) {
+        unsigned int nr, ng, nb, na;
+        unpack_rgba(new_rgba, nr, ng, nb, na);
+        FPDFPageObj_SetFillColor(obj, nr, ng, nb, na);
+    }
+
+    // 4. Translate position
+    if (std::abs(dx_pt) > 1e-4 || std::abs(dy_pt) > 1e-4) {
+        FPDFPageObj_Transform(obj, 1.0, 0.0, 0.0, 1.0, dx_pt, dy_pt);
+    }
+
+    FPDF_BOOL gen_ok = FPDFPage_GenerateContent(page);
+    FPDF_ClosePage(page);
+    if (!gen_ok) {
+        set_last_error("Failed to regenerate page content after updating text object");
         return PV_ERR_EDIT_FAILED;
     }
     return PV_OK;
@@ -1987,6 +2213,7 @@ PV_API pv_status_t pv_page_add_text_object(
     unsigned int r, g, b, a;
     unpack_rgba(rgba, r, g, b, a);
     FPDFPageObj_SetFillColor(text_obj, r, g, b, a);
+    FPDFPageObj_AddMark(text_obj, "PVText");
     FPDFPageObj_Transform(text_obj, 1.0, 0.0, 0.0, 1.0, x_pt, y_pt);
 
     FPDFPage_InsertObject(page, text_obj);
@@ -2703,6 +2930,7 @@ PV_API pv_status_t pv_page_add_unicode_text_object(
     unsigned int r, g, b, a;
     unpack_rgba(rgba, r, g, b, a);
     FPDFPageObj_SetFillColor(text_obj, r, g, b, a);
+    FPDFPageObj_AddMark(text_obj, "PVText");
     FPDFPageObj_Transform(text_obj, 1.0, 0.0, 0.0, 1.0, x_pt, y_pt);
     FPDFPage_InsertObject(page, text_obj);
     int idx = FPDFPage_CountObjects(page) - 1;

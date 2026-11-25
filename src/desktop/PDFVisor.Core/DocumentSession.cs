@@ -88,8 +88,10 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     private int _documentRevision;
     private bool _darkReadingMode;
     private bool _twoPageMode;
+    private bool _showStickyNotes = true;
+    private int _stickyNotesViewRevision;
     private AnnotationTool _activeTool = AnnotationTool.None;
-    private uint _activeColorRgba = 0xE53935FF;
+    private uint _activeColorRgba = 0xFFCA28FF;
     private float _activeFontSize = 14f;
     private string _searchQuery = string.Empty;
     private bool _searchMatchCase;
@@ -98,6 +100,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     private int _activeMatchIndex = -1;
     private readonly Stack<int> _backStack = new();
     private readonly Stack<int> _forwardStack = new();
+    private readonly HashSet<(int PageIndex, int AnnotIndex)> _expandedStickyNotes = [];
     private bool _isNavigatingHistory;
 
     /// <summary>
@@ -202,6 +205,54 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         get => _twoPageMode;
         set => SetProperty(ref _twoPageMode, value);
+    }
+
+    public bool ShowStickyNotes
+    {
+        get => _showStickyNotes;
+        set => SetProperty(ref _showStickyNotes, value);
+    }
+
+    public int StickyNotesViewRevision
+    {
+        get => _stickyNotesViewRevision;
+        private set => SetProperty(ref _stickyNotesViewRevision, value);
+    }
+
+    public int StickyNoteCount => Annotations.Count(a => a.Subtype == PdfAnnotSubtype.Text);
+    public int CommentCount => Annotations.Count;
+
+    public bool IsStickyNoteExpanded(int pageIndex, int annotIndex) =>
+        _expandedStickyNotes.Contains((pageIndex, annotIndex));
+
+    public void SetStickyNoteExpanded(int pageIndex, int annotIndex, bool expanded)
+    {
+        bool changed = expanded
+            ? _expandedStickyNotes.Add((pageIndex, annotIndex))
+            : _expandedStickyNotes.Remove((pageIndex, annotIndex));
+        if (changed) StickyNotesViewRevision++;
+    }
+
+    public void ToggleStickyNoteExpanded(int pageIndex, int annotIndex)
+    {
+        SetStickyNoteExpanded(pageIndex, annotIndex, !IsStickyNoteExpanded(pageIndex, annotIndex));
+    }
+
+    public void ExpandAllStickyNotes()
+    {
+        ShowStickyNotes = true;
+        foreach (var a in Annotations.Where(x => x.Subtype == PdfAnnotSubtype.Text))
+        {
+            _expandedStickyNotes.Add((a.PageIndex, a.Index));
+        }
+        StickyNotesViewRevision++;
+    }
+
+    public void CollapseAllStickyNotes()
+    {
+        if (_expandedStickyNotes.Count == 0) return;
+        _expandedStickyNotes.Clear();
+        StickyNotesViewRevision++;
     }
 
     /// <summary>
@@ -395,6 +446,9 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         {
             Attachments.Add(att);
         }
+
+        OnPropertyChanged(nameof(StickyNoteCount));
+        OnPropertyChanged(nameof(CommentCount));
     }
 
     public IReadOnlyList<PdfAnnotationInfo> GetInteractiveAnnotationsForPage(int pageIndex) =>
@@ -404,6 +458,11 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         pageIndex == CurrentPageIndex
             ? CurrentPageObjects.Where(o => o.Type == PdfPageObjectType.Image).ToArray()
             : _document.GetPageObjects(pageIndex).Where(o => o.Type == PdfPageObjectType.Image).ToArray();
+
+    public IReadOnlyList<PdfPageObjectInfo> GetTextObjectsForPage(int pageIndex) =>
+        pageIndex == CurrentPageIndex
+            ? CurrentPageObjects.Where(o => o.Type == PdfPageObjectType.Text && !o.IsInvisible && !string.IsNullOrWhiteSpace(o.Text)).ToArray()
+            : _document.GetPageObjects(pageIndex).Where(o => o.Type == PdfPageObjectType.Text && !o.IsInvisible && !string.IsNullOrWhiteSpace(o.Text)).ToArray();
 
     public void RefreshCurrentPageObjects()
     {
@@ -418,8 +477,38 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     public void EditTextObject(int objIndex, string oldText, string newText)
     {
         if (PageCount == 0) return;
+        var existing = CurrentPageObjects.FirstOrDefault(o => o.Index == objIndex && o.Type == PdfPageObjectType.Text);
+        if (existing is not null)
+        {
+            UpdateTextObject(CurrentPageIndex, existing, newText: newText);
+            return;
+        }
         History.Execute(new EditTextObjectCommand(_document, CurrentPageIndex, objIndex, oldText, newText));
         OnDocumentMutated(CurrentPageIndex);
+    }
+
+    public void UpdateTextObject(
+        int pageIndex,
+        PdfPageObjectInfo existing,
+        string? newText = null,
+        float? newFontSize = null,
+        uint? newColorRgba = null,
+        double dxPt = 0.0,
+        double dyPt = 0.0)
+    {
+        if (PageCount == 0 || pageIndex < 0 || pageIndex >= PageCount) return;
+        string? ttf = FindWindowsUnicodeFont();
+        History.Execute(new UpdateTextObjectCommand(
+            _document,
+            pageIndex,
+            existing,
+            newText,
+            newFontSize,
+            newColorRgba,
+            dxPt,
+            dyPt,
+            ttf));
+        OnDocumentMutated(pageIndex);
     }
 
     public void MovePageObject(int objIndex, double dxPt, double dyPt)
@@ -493,6 +582,14 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         if (PageCount == 0) return;
         int p = existing.PageIndex;
         int idx = existing.Index;
+        _expandedStickyNotes.Remove((p, idx));
+        var shifted = _expandedStickyNotes.Where(x => x.PageIndex == p && x.AnnotIndex > idx).ToList();
+        foreach (var item in shifted)
+        {
+            _expandedStickyNotes.Remove(item);
+            _expandedStickyNotes.Add((p, item.AnnotIndex - 1));
+        }
+
         History.Execute(new SnapshotInMemoryMutationCommand(
             _document,
             $"Eliminar {existing.TypeDisplay} en página {p + 1}",
@@ -565,26 +662,29 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         OnExternalWorkingCopyMutated(cur);
     }
 
-    public void AddTextObject(string text, double xPt, double yPt, string fontName = "Helvetica", float fontSize = 14f, uint rgba = 0x111111FF)
+    public int AddTextObject(string text, double xPt, double yPt, string fontName = "Helvetica", float fontSize = 14f, uint rgba = 0x181818FF, int? targetPageIndex = null)
     {
-        if (PageCount == 0) return;
-        // Prefer TrueType Unicode font from Windows Fonts when text contains non-ASCII characters (á, é, í, ó, ú, ñ, €, etc.)
+        if (PageCount == 0 || string.IsNullOrWhiteSpace(text)) return -1;
+        int pageIdx = targetPageIndex is int p ? Math.Clamp(p, 0, PageCount - 1) : CurrentPageIndex;
         bool hasNonAscii = text.Any(c => c > 127);
-        string? windowsTtf = FindWindowsUnicodeFont();
+        string? windowsTtf = hasNonAscii ? FindWindowsUnicodeFont() : null;
         if (hasNonAscii && windowsTtf is not null)
         {
-            History.Execute(new AddUnicodeTextObjectCommand(_document, CurrentPageIndex, text, windowsTtf, fontSize, xPt, yPt, rgba));
-            OnDocumentMutated(CurrentPageIndex);
-            return;
+            History.Execute(new AddUnicodeTextObjectCommand(_document, pageIdx, text, windowsTtf, fontSize, xPt, yPt, rgba));
+            OnDocumentMutated(pageIdx);
+            return CurrentPageObjects.LastOrDefault(o => o.Type == PdfPageObjectType.Text)?.Index
+                ?? (_document.GetPageObjects(pageIdx).LastOrDefault(o => o.Type == PdfPageObjectType.Text)?.Index ?? -1);
         }
-        History.Execute(new AddTextObjectCommand(_document, CurrentPageIndex, text, fontName, fontSize, xPt, yPt, rgba));
-        OnDocumentMutated(CurrentPageIndex);
+        History.Execute(new AddTextObjectCommand(_document, pageIdx, text, fontName, fontSize, xPt, yPt, rgba));
+        OnDocumentMutated(pageIdx);
+        return CurrentPageObjects.LastOrDefault(o => o.Type == PdfPageObjectType.Text)?.Index
+            ?? (_document.GetPageObjects(pageIdx).LastOrDefault(o => o.Type == PdfPageObjectType.Text)?.Index ?? -1);
     }
 
     public static string? FindWindowsUnicodeFont()
     {
         string fontsDir = Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
-        string[] candidates = ["arial.ttf", "segoeui.ttf", "calibri.ttf", "tahoma.ttf"];
+        string[] candidates = ["segoeui.ttf", "calibri.ttf", "tahoma.ttf", "arial.ttf"];
         foreach (string c in candidates)
         {
             string full = Path.Combine(fontsDir, c);
@@ -1036,11 +1136,21 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         OnDocumentMutated(CurrentPageIndex);
     }
 
-    public void AddNote(PvRect pdfRect, string contents, uint rgba = 0xFFC107FF)
+    public int AddNote(PvRect pdfRect, string contents, uint rgba = 0xFFCA28FF, int? targetPageIndex = null, bool expandCard = true)
     {
-        if (PageCount == 0) return;
-        History.Execute(new AddNoteCommand(_document, CurrentPageIndex, pdfRect, contents, rgba));
-        OnDocumentMutated(CurrentPageIndex);
+        if (PageCount == 0) return -1;
+        int pageIdx = targetPageIndex is int p ? Math.Clamp(p, 0, PageCount - 1) : CurrentPageIndex;
+        History.Execute(new AddNoteCommand(_document, pageIdx, pdfRect, contents, rgba));
+        ShowStickyNotes = true;
+        OnDocumentMutated(pageIdx);
+        var created = Annotations.LastOrDefault(a => a.PageIndex == pageIdx && a.Subtype == PdfAnnotSubtype.Text);
+        int annotIdx = created?.Index ?? -1;
+        if (expandCard && annotIdx >= 0)
+        {
+            _expandedStickyNotes.Add((pageIdx, annotIdx));
+            StickyNotesViewRevision++;
+        }
+        return annotIdx;
     }
 
     public void AddInk(PvPoint[] pdfPoints, uint rgba = 0x1E88E5FF)

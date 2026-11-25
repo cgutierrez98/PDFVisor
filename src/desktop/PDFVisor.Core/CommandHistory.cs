@@ -654,6 +654,73 @@ public sealed class ResizeImageObjectCommand : IDocumentCommand
     public void Dispose() { }
 }
 
+public sealed class UpdateTextObjectCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly int _pageIndex;
+    private readonly int _objIndex;
+    private readonly string _oldText;
+    private readonly string? _newText;
+    private readonly float _oldFontSize;
+    private readonly float _newFontSize;
+    private readonly uint _oldColorRgba;
+    private readonly uint? _newColorRgba;
+    private readonly double _dxPt;
+    private readonly double _dyPt;
+    private readonly string? _fallbackTtfPath;
+
+    public string Description => $"Modificar texto en página {_pageIndex + 1}";
+
+    public UpdateTextObjectCommand(
+        PdfDocument doc,
+        int pageIndex,
+        PdfPageObjectInfo existing,
+        string? newText,
+        float? newFontSize,
+        uint? newColorRgba,
+        double dxPt,
+        double dyPt,
+        string? fallbackTtfPath)
+    {
+        _doc = doc;
+        _pageIndex = pageIndex;
+        _objIndex = existing.Index;
+        _oldText = existing.Text;
+        _newText = newText;
+        _oldFontSize = Math.Max(6f, existing.FontSize);
+        _newFontSize = newFontSize.HasValue ? Math.Clamp(newFontSize.Value, 4f, 200f) : 0f;
+        _oldColorRgba = existing.ColorRgba;
+        _newColorRgba = newColorRgba;
+        _dxPt = dxPt;
+        _dyPt = dyPt;
+        _fallbackTtfPath = fallbackTtfPath;
+    }
+
+    public void Execute() =>
+        _doc.UpdateTextObject(
+            _pageIndex,
+            _objIndex,
+            _newText,
+            _fallbackTtfPath,
+            _newFontSize,
+            _newColorRgba,
+            _dxPt,
+            _dyPt);
+
+    public void Undo() =>
+        _doc.UpdateTextObject(
+            _pageIndex,
+            _objIndex,
+            _newText is not null ? _oldText : null,
+            _fallbackTtfPath,
+            _newFontSize > 0f ? _oldFontSize : 0f,
+            _newColorRgba.HasValue ? _oldColorRgba : null,
+            -_dxPt,
+            -_dyPt);
+
+    public void Dispose() { }
+}
+
 public sealed class SnapshotInMemoryMutationCommand : IDocumentCommand
 {
     private readonly PdfDocument _doc;

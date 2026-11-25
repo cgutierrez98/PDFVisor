@@ -112,6 +112,7 @@ public partial class MainWindow : Window
         PdfViewport.ExternalUriRequested = OnExternalUriRequested;
         PdfViewport.SignatureRegionSelected = OnSignatureRegionSelected;
         PdfViewport.ToolAutoReset = () => SyncToolToggleButtons(_boundSession?.ActiveTool ?? AnnotationTool.None);
+        PdfViewport.SelectionChanged = () => SyncToolToggleButtons(_boundSession?.ActiveTool ?? AnnotationTool.None);
 
         RefreshRecentFilesUi();
         Loaded += (_, _) =>
@@ -584,6 +585,9 @@ public partial class MainWindow : Window
         MenuFitPage.IsEnabled = hasDoc;
         MenuTwoPage.IsEnabled = hasDoc;
         MenuDarkRead.IsEnabled = hasDoc;
+        MenuShowStickyNotes.IsEnabled = hasDoc;
+        MenuExpandAllNotes.IsEnabled = hasDoc && session!.StickyNoteCount > 0;
+        MenuCollapseAllNotes.IsEnabled = hasDoc && session!.StickyNoteCount > 0;
 
         MenuInsertBlankPage.IsEnabled = hasDoc;
         MenuCropPage.IsEnabled = hasDoc;
@@ -623,8 +627,19 @@ public partial class MainWindow : Window
         ToolInk.IsEnabled = hasDoc;
         ToolAddText.IsEnabled = hasDoc;
         ToolRedact.IsEnabled = hasDoc;
+        BtnToggleStickyNotes.IsEnabled = hasDoc;
         BtnDarkRead.IsEnabled = hasDoc;
         BtnSearchToggle.IsEnabled = hasDoc;
+
+        if (hasDoc && session!.CommentCount > 0)
+        {
+            TxtCommentsCount.Text = session.CommentCount > 99 ? "99+" : session.CommentCount.ToString();
+            CommentsCountBadge.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            CommentsCountBadge.Visibility = Visibility.Collapsed;
+        }
 
         _isUpdatingControls = true;
         try
@@ -641,6 +656,8 @@ public partial class MainWindow : Window
                 StatusZoom.Text = session.ZoomPercentText;
                 BtnDarkRead.IsChecked = session.DarkReadingMode;
                 MenuDarkRead.IsChecked = session.DarkReadingMode;
+                BtnToggleStickyNotes.IsChecked = session.ShowStickyNotes;
+                MenuShowStickyNotes.IsChecked = session.ShowStickyNotes;
                 MenuTwoPage.IsChecked = session.TwoPageMode;
 
                 if (PageList.SelectedIndex != session.CurrentPageIndex && session.CurrentPageIndex < PageList.Items.Count)
@@ -660,6 +677,8 @@ public partial class MainWindow : Window
                 StatusZoom.Text = string.Empty;
                 BtnDarkRead.IsChecked = false;
                 MenuDarkRead.IsChecked = false;
+                BtnToggleStickyNotes.IsChecked = true;
+                MenuShowStickyNotes.IsChecked = true;
             }
         }
         finally
@@ -748,10 +767,11 @@ public partial class MainWindow : Window
         ToolAddText.IsChecked = tool == AnnotationTool.AddText;
         ToolRedact.IsChecked = tool == AnnotationTool.Redact;
 
-        bool showColorPicker = tool is AnnotationTool.Highlight or AnnotationTool.Underline or AnnotationTool.StrikeOut
+        bool hasSelectedTextObj = PdfViewport.SelectedTextObject is not null;
+        bool showColorPicker = hasSelectedTextObj || tool is AnnotationTool.Highlight or AnnotationTool.Underline or AnnotationTool.StrikeOut
             or AnnotationTool.Square or AnnotationTool.Note or AnnotationTool.Ink or AnnotationTool.AddText;
         ToolOptionsBar.Visibility = showColorPicker ? Visibility.Visible : Visibility.Collapsed;
-        CmbFontSize.Visibility = tool == AnnotationTool.AddText ? Visibility.Visible : Visibility.Collapsed;
+        CmbFontSize.Visibility = (tool == AnnotationTool.AddText || hasSelectedTextObj) ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void ColorSwatch_Click(object sender, RoutedEventArgs e)
@@ -760,7 +780,10 @@ public partial class MainWindow : Window
         if (uint.TryParse(hex, System.Globalization.NumberStyles.HexNumber, null, out uint rgba))
         {
             _boundSession.ActiveColorRgba = rgba;
-            StatusMessage.Text = "Color de herramienta actualizado";
+            if (PdfViewport.UpdateSelectedTextStyle(newColorRgba: rgba))
+                StatusMessage.Text = "Color del texto actualizado";
+            else
+                StatusMessage.Text = "Color de herramienta actualizado";
         }
     }
 
@@ -771,6 +794,8 @@ public partial class MainWindow : Window
         if (float.TryParse(raw, out float pt))
         {
             _boundSession.ActiveFontSize = pt;
+            if (PdfViewport.UpdateSelectedTextStyle(newFontSize: pt))
+                StatusMessage.Text = $"Tamaño de texto actualizado a {pt:0.#} pt";
         }
     }
 
@@ -1272,6 +1297,47 @@ public partial class MainWindow : Window
     {
         if (_boundSession is not null)
             _boundSession.TwoPageMode = MenuTwoPage.IsChecked;
+    }
+
+    private void BtnToggleStickyNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        _boundSession.ShowStickyNotes = BtnToggleStickyNotes.IsChecked == true;
+        StatusMessage.Text = _boundSession.ShowStickyNotes
+            ? "Notas adhesivas visibles en la página"
+            : "Notas adhesivas ocultas en la página";
+    }
+
+    private void MenuShowStickyNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        _boundSession.ShowStickyNotes = MenuShowStickyNotes.IsChecked;
+        StatusMessage.Text = _boundSession.ShowStickyNotes
+            ? "Notas adhesivas visibles en la página"
+            : "Notas adhesivas ocultas en la página";
+    }
+
+    private void MenuContextToggleNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        _boundSession.ShowStickyNotes = !_boundSession.ShowStickyNotes;
+        StatusMessage.Text = _boundSession.ShowStickyNotes
+            ? "Notas adhesivas visibles en la página"
+            : "Notas adhesivas ocultas en la página";
+    }
+
+    private void BtnExpandAllNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        _boundSession.ExpandAllStickyNotes();
+        StatusMessage.Text = "Todas las notas adhesivas desplegadas en sus páginas";
+    }
+
+    private void BtnCollapseAllNotes_Click(object sender, RoutedEventArgs e)
+    {
+        if (_boundSession is null) return;
+        _boundSession.CollapseAllStickyNotes();
+        StatusMessage.Text = "Notas adhesivas contraídas a iconos";
     }
 
     private void MenuFullscreen_Click(object sender, RoutedEventArgs e) => ToggleFullscreen();
@@ -2030,6 +2096,11 @@ public partial class MainWindow : Window
             annot.PageIndex >= 0 && annot.PageIndex < _boundSession.PageCount)
         {
             _boundSession.CurrentPageIndex = annot.PageIndex;
+            if (annot.Subtype == PdfAnnotSubtype.Text)
+            {
+                _boundSession.ShowStickyNotes = true;
+                _boundSession.SetStickyNoteExpanded(annot.PageIndex, annot.Index, true);
+            }
         }
     }
 
@@ -2038,6 +2109,13 @@ public partial class MainWindow : Window
     private void BtnEditAnnotation_Click(object sender, RoutedEventArgs e)
     {
         if (_boundSession is null || AnnotationList.SelectedItem is not PdfAnnotationInfo annot) return;
+        if (annot.Subtype == PdfAnnotSubtype.Text)
+        {
+            PdfViewport.FocusStickyNote(annot.PageIndex, annot.Index);
+            StatusMessage.Text = "Nota adhesiva abierta sobre la página para edición";
+            return;
+        }
+
         string? edited = PromptInput($"Editar {annot.TypeDisplay}", "Comentario / nota:", annot.Contents);
         if (edited is null) return;
         try
@@ -2204,19 +2282,24 @@ public partial class MainWindow : Window
         }
     }
 
+    private void PageObjectList_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_isUpdatingControls || _boundSession is null || PageObjectList.SelectedItem is not PdfPageObjectInfo obj)
+            return;
+        if (obj.Type == PdfPageObjectType.Text && !obj.IsInvisible)
+        {
+            PdfViewport.SelectTextObject(_boundSession.CurrentPageIndex, obj, openInlineEditor: false);
+            StatusMessage.Text = "Texto seleccionado en la página (arrastra para mover, esquina o A+/A- para tamaño, doble clic para editar)";
+        }
+    }
+
     private void PageObjectList_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
         if (_boundSession is null || PageObjectList.SelectedItem is not PdfPageObjectInfo obj) return;
         if (obj.Type != PdfPageObjectType.Text) return;
 
-        string? edited = PromptInput("Editar texto", "Nuevo texto:", initialValue: obj.Text);
-        if (string.IsNullOrWhiteSpace(edited)) return;
-        try { _boundSession.EditTextObject(obj.Index, obj.Text, edited); }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, $"No se pudo editar el texto:\n{ex.Message}", "Error al editar texto",
-                MessageBoxButton.OK, MessageBoxImage.Error);
-        }
+        PdfViewport.SelectTextObject(_boundSession.CurrentPageIndex, obj, openInlineEditor: true);
+        StatusMessage.Text = "Editando texto directamente sobre la página (Enter para guardar, Esc para cancelar)";
     }
 
     private string? PromptInput(string title, string prompt, string initialValue = "", bool isPassword = false)

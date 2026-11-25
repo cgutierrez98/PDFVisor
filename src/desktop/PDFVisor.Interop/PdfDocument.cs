@@ -618,7 +618,7 @@ public sealed class PdfDocument : IDisposable
             {
                 var n = Marshal.PtrToStructure<PvPageObjectInfoNative>(ptr + i * structSize);
                 string text = n.TextUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(n.TextUtf8) ?? "" : "";
-                list.Add(new PdfPageObjectInfo(n.Index, (PdfPageObjectType)n.Type, n.Bounds, n.FontSize, text));
+                list.Add(new PdfPageObjectInfo(n.Index, (PdfPageObjectType)n.Type, n.Bounds, n.FontSize, text, n.ColorRgba, n.Flags));
             }
             return list;
         }
@@ -633,6 +633,31 @@ public sealed class PdfDocument : IDisposable
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
         ArgumentException.ThrowIfNullOrEmpty(newText);
         var status = NativeMethods.pv_page_edit_text_object(_handle.DangerousGetHandle(), pageIndex, objIndex, newText);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
+    public void UpdateTextObject(
+        int pageIndex,
+        int objIndex,
+        string? newText = null,
+        string? fallbackTtfPath = null,
+        float newFontSize = 0f,
+        uint? newColorRgba = null,
+        double dxPt = 0.0,
+        double dyPt = 0.0)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_page_update_text_object(
+            _handle.DangerousGetHandle(),
+            pageIndex,
+            objIndex,
+            newText,
+            fallbackTtfPath,
+            newFontSize,
+            newColorRgba.HasValue ? 1 : 0,
+            newColorRgba ?? 0,
+            dxPt,
+            dyPt);
         PdfEngine.ThrowIfFailed(status);
     }
 

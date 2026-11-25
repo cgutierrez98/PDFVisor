@@ -324,9 +324,31 @@ public sealed class EngineSmokeTests : IDisposable
             session.Redo();
             Assert.Contains("Updated Heading", session.Document.ExtractPageText(0));
 
-            // 3. Add a brand new text object
-            session.AddTextObject("Inserted Paragraph", 72, 620, "Helvetica", 14f);
+            // 3. Add a brand new text object (tagged as user-added PVText) + update text (with Unicode!), font size, color, position + Undo/Redo
+            int addedIdx = session.AddTextObject("Inserted Paragraph", 72, 620, "Helvetica", 14f, 0x1E88E5FF);
+            Assert.True(addedIdx >= 0);
             Assert.Contains("Inserted Paragraph", session.Document.ExtractPageText(0));
+
+            var addedTxtObj = Assert.Single(session.GetTextObjectsForPage(0), o => o.Index == addedIdx);
+            Assert.True(addedTxtObj.IsUserAddedText);
+            Assert.InRange(addedTxtObj.FontSize, 13.5f, 14.5f);
+            Assert.Equal("#1E88E5", addedTxtObj.ColorHex);
+
+            session.UpdateTextObject(0, addedTxtObj, newText: "Texto Editado 100€", newFontSize: 24f, newColorRgba: 0xE53935FF, dxPt: 40.0, dyPt: -30.0);
+            var modifiedTxtObj = Assert.Single(session.GetTextObjectsForPage(0), o => o.Index == addedIdx);
+            Assert.Contains("Texto Editado 100€", modifiedTxtObj.Text);
+            Assert.InRange(modifiedTxtObj.FontSize, 23.5f, 24.5f);
+            Assert.Equal("#E53935", modifiedTxtObj.ColorHex);
+            Assert.InRange(modifiedTxtObj.Bounds.Left - addedTxtObj.Bounds.Left, 38.0, 42.0);
+
+            // Undo restores original text, 14pt size, blue color, and original position!
+            session.Undo();
+            var undoneTxtObj = Assert.Single(session.GetTextObjectsForPage(0), o => o.Index == addedIdx);
+            Assert.Contains("Inserted Paragraph", undoneTxtObj.Text);
+            Assert.InRange(undoneTxtObj.FontSize, 13.5f, 14.5f);
+            Assert.Equal("#1E88E5", undoneTxtObj.ColorHex);
+            session.Redo();
+            Assert.Contains("Texto Editado 100€", session.Document.ExtractPageText(0));
 
             // 4. Insert a 16x16 solid blue BGRA image object
             byte[] imgBgra = new byte[16 * 16 * 4];
@@ -355,8 +377,10 @@ public sealed class EngineSmokeTests : IDisposable
         {
             string text = reopened.ExtractPageText(0);
             Assert.Contains("Updated Heading", text);
-            Assert.Contains("Inserted Paragraph", text);
-            Assert.Contains(reopened.GetPageObjects(0), o => o.Type == PdfPageObjectType.Image);
+            Assert.Contains("Texto Editado 100€", text);
+            var reopenedObjs = reopened.GetPageObjects(0);
+            Assert.Contains(reopenedObjs, o => o.Type == PdfPageObjectType.Image);
+            Assert.Contains(reopenedObjs, o => o.Type == PdfPageObjectType.Text && o.IsUserAddedText && Math.Abs(o.FontSize - 24f) < 0.5f);
         }
     }
 
@@ -805,9 +829,21 @@ public sealed class EngineSmokeTests : IDisposable
 
             var noteAnnot = Assert.Single(session.Annotations, a => a.Subtype == PdfAnnotSubtype.Text);
             Assert.Equal("Nota inicial", noteAnnot.Contents);
-            session.UpdateExistingAnnotation(noteAnnot, new PvRect { Left = 340, Bottom = 610, Right = 364, Top = 634 }, "Nota editada");
+            Assert.Equal("#FFCA28", noteAnnot.ColorHex);
+            Assert.Equal(1, session.StickyNoteCount);
+            Assert.True(session.IsStickyNoteExpanded(0, noteAnnot.Index));
+            session.CollapseAllStickyNotes();
+            Assert.False(session.IsStickyNoteExpanded(0, noteAnnot.Index));
+            session.ExpandAllStickyNotes();
+            Assert.True(session.IsStickyNoteExpanded(0, noteAnnot.Index));
+            session.ShowStickyNotes = false;
+            Assert.False(session.ShowStickyNotes);
+            session.ShowStickyNotes = true;
+
+            session.UpdateExistingAnnotation(noteAnnot, new PvRect { Left = 340, Bottom = 610, Right = 364, Top = 634 }, "Nota editada", newColor: 0x43A047FF);
             var updatedNote = Assert.Single(session.Annotations, a => a.Subtype == PdfAnnotSubtype.Text);
             Assert.Equal("Nota editada", updatedNote.Contents);
+            Assert.Equal("#43A047", updatedNote.ColorHex);
             Assert.InRange(updatedNote.Rect.Left, 339, 341);
             session.Undo();
             Assert.Equal("Nota inicial", Assert.Single(session.Annotations, a => a.Subtype == PdfAnnotSubtype.Text).Contents);

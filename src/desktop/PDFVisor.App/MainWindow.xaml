@@ -59,6 +59,9 @@
                 <Separator/>
                 <MenuItem x:Name="MenuTwoPage" Header="Vista a _doble página (Modo libro)" IsCheckable="True" Click="MenuTwoPage_Click"/>
                 <MenuItem x:Name="MenuDarkRead" Header="Modo _lectura oscuro" IsCheckable="True" Click="MenuDarkRead_Click"/>
+                <MenuItem x:Name="MenuShowStickyNotes" Header="Mostrar _notas adhesivas en la página" IsCheckable="True" IsChecked="True" Click="MenuShowStickyNotes_Click"/>
+                <MenuItem x:Name="MenuExpandAllNotes" Header="_Expandir todas las notas adhesivas" Click="BtnExpandAllNotes_Click"/>
+                <MenuItem x:Name="MenuCollapseAllNotes" Header="_Contraer todas las notas adhesivas" Click="BtnCollapseAllNotes_Click"/>
                 <MenuItem x:Name="MenuFullscreen" Header="_Pantalla completa" InputGestureText="F11" IsCheckable="True" Click="MenuFullscreen_Click"/>
                 <Separator/>
                 <MenuItem x:Name="MenuRootLanguage" Header="_Idioma">
@@ -239,6 +242,7 @@
 
                     <Border Style="{StaticResource ToolbarDivider}"/>
 
+                    <ToggleButton x:Name="BtnToggleStickyNotes" Style="{StaticResource ToolToggleButton}" Content="&#xE90A;" IsChecked="True" Click="BtnToggleStickyNotes_Click" ToolTip="Mostrar / ocultar notas adhesivas en la página"/>
                     <ToggleButton x:Name="BtnDarkRead" Style="{StaticResource ToolToggleButton}" Content="&#xE708;" Click="BtnDarkRead_Click" ToolTip="Modo lectura oscuro"/>
                     <Button x:Name="BtnSearchToggle" Style="{StaticResource IconToolbarButton}" Content="&#xE721;" Click="BtnToggleSearch_Click" ToolTip="Buscar en el documento (Ctrl+F)"/>
                 </StackPanel>
@@ -330,7 +334,28 @@
                     <StackPanel Orientation="Vertical" Margin="0,6,0,0">
                         <ToggleButton x:Name="RailThumbnails" Style="{StaticResource RailIconButton}" Content="&#xE80A;" IsChecked="True" Click="RailButton_Click" ToolTip="Miniaturas de páginas"/>
                         <ToggleButton x:Name="RailBookmarks" Style="{StaticResource RailIconButton}" Content="&#xE8A4;" Click="RailButton_Click" ToolTip="Marcadores / Índice"/>
-                        <ToggleButton x:Name="RailComments" Style="{StaticResource RailIconButton}" Content="&#xE90A;" Click="RailButton_Click" ToolTip="Comentarios y anotaciones"/>
+                        <Grid>
+                            <ToggleButton x:Name="RailComments" Style="{StaticResource RailIconButton}" Content="&#xE90A;" Click="RailButton_Click" ToolTip="Comentarios y notas adhesivas"/>
+                            <Border x:Name="CommentsCountBadge"
+                                    Visibility="Collapsed"
+                                    IsHitTestVisible="False"
+                                    Background="#D92638"
+                                    CornerRadius="7"
+                                    MinWidth="14"
+                                    Height="14"
+                                    Padding="3,0"
+                                    HorizontalAlignment="Right"
+                                    VerticalAlignment="Top"
+                                    Margin="0,3,4,0">
+                                <TextBlock x:Name="TxtCommentsCount"
+                                           Text="0"
+                                           FontSize="9.5"
+                                           FontWeight="Bold"
+                                           Foreground="White"
+                                           HorizontalAlignment="Center"
+                                           VerticalAlignment="Center"/>
+                            </Border>
+                        </Grid>
                         <ToggleButton x:Name="RailForms" Style="{StaticResource RailIconButton}" Content="&#xE8F1;" Click="RailButton_Click" ToolTip="Campos de formulario"/>
                         <ToggleButton x:Name="RailSignatures" Style="{StaticResource RailIconButton}" Content="&#xE8D7;" Click="RailButton_Click" ToolTip="Firmas digitales"/>
                         <ToggleButton x:Name="RailAttachments" Style="{StaticResource RailIconButton}" Content="&#xE723;" Click="RailButton_Click" ToolTip="Archivos adjuntos"/>
@@ -416,12 +441,18 @@
                                 </TreeView>
                             </DockPanel>
 
-                            <!-- Panel 2: Comments & Annotations -->
+                            <!-- Panel 2: Comments & Sticky Notes -->
                             <DockPanel x:Name="CommentsPanel" Visibility="Collapsed">
-                                <UniformGrid DockPanel.Dock="Top" Columns="2" Margin="8,2,8,8">
-                                    <Button Style="{StaticResource SecondaryButton}" Content="Editar nota" Padding="6,4" FontSize="11.5" Margin="0,0,3,0" Click="BtnEditAnnotation_Click"/>
-                                    <Button Style="{StaticResource SecondaryButton}" Content="Eliminar" Padding="6,4" FontSize="11.5" Margin="3,0,0,0" Click="BtnDeleteAnnotation_Click"/>
-                                </UniformGrid>
+                                <StackPanel DockPanel.Dock="Top" Margin="8,2,8,8">
+                                    <UniformGrid Columns="2" Margin="0,0,0,4">
+                                        <Button Style="{StaticResource SecondaryButton}" Content="Expandir notas" Padding="6,4" FontSize="11.5" Margin="0,0,3,0" Click="BtnExpandAllNotes_Click" ToolTip="Abrir todas las tarjetas Post-it sobre sus páginas"/>
+                                        <Button Style="{StaticResource SecondaryButton}" Content="Contraer notas" Padding="6,4" FontSize="11.5" Margin="3,0,0,0" Click="BtnCollapseAllNotes_Click" ToolTip="Plegar todas las notas adhesivas a iconos"/>
+                                    </UniformGrid>
+                                    <UniformGrid Columns="2">
+                                        <Button Style="{StaticResource SecondaryButton}" Content="Editar texto" Padding="6,4" FontSize="11.5" Margin="0,0,3,0" Click="BtnEditAnnotation_Click"/>
+                                        <Button Style="{StaticResource SecondaryButton}" Content="Eliminar" Padding="6,4" FontSize="11.5" Margin="3,0,0,0" Click="BtnDeleteAnnotation_Click"/>
+                                    </UniformGrid>
+                                </StackPanel>
                                 <ListBox x:Name="AnnotationList"
                                          SelectionChanged="AnnotationList_SelectionChanged"
                                          MouseDoubleClick="AnnotationList_MouseDoubleClick"
@@ -429,12 +460,18 @@
                                          BorderThickness="0"
                                          Background="Transparent"
                                          Padding="6"
-                                         ToolTip="Clic para ir a la página • Doble clic para editar comentario • Supr para eliminar">
+                                         ToolTip="Clic para ir a la nota y abrir su Post-it • Supr para eliminar">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
-                                            <StackPanel Margin="4,4">
-                                                <TextBlock Text="{Binding DisplaySummary}" TextWrapping="Wrap" FontSize="12"/>
-                                            </StackPanel>
+                                            <Border BorderBrush="#28888888" BorderThickness="1" CornerRadius="5" Margin="2,3" Padding="0">
+                                                <DockPanel>
+                                                    <Border DockPanel.Dock="Left" Width="5" CornerRadius="4,0,0,4" Background="{Binding ColorHex}"/>
+                                                    <StackPanel Margin="8,6">
+                                                        <TextBlock Text="{Binding HeaderLabel}" FontWeight="SemiBold" FontSize="11.5" Opacity="0.85"/>
+                                                        <TextBlock Text="{Binding Contents}" TextWrapping="Wrap" FontSize="12" Margin="0,2,0,0"/>
+                                                    </StackPanel>
+                                                </DockPanel>
+                                            </Border>
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
                                 </ListBox>
@@ -516,12 +553,13 @@
                             <!-- Panel 6: Page Objects -->
                             <ListBox x:Name="PageObjectList"
                                      Visibility="Collapsed"
+                                     SelectionChanged="PageObjectList_SelectionChanged"
                                      MouseDoubleClick="PageObjectList_MouseDoubleClick"
                                      KeyDown="PageObjectList_KeyDown"
                                      BorderThickness="0"
                                      Background="Transparent"
                                      Padding="6"
-                                     ToolTip="Doble clic en un texto para editarlo • Arrastra imágenes en la página • Supr para eliminar">
+                                     ToolTip="Clic para seleccionar en la página (mover/tamaño/color) • Doble clic para editar texto • Supr para eliminar">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding DisplayLabel}" TextTrimming="CharacterEllipsis" Margin="4,4" FontSize="12"/>
@@ -549,6 +587,10 @@
                                 <MenuItem Header="Ajustar a la página" Click="BtnFitPage_Click"/>
                                 <MenuItem Header="Recortar página..." Click="BtnCropPage_Click"/>
                                 <MenuItem Header="Rotar página 90°" Click="BtnRotatePage_Click"/>
+                                <Separator/>
+                                <MenuItem Header="Mostrar / ocultar notas adhesivas" Click="MenuContextToggleNotes_Click"/>
+                                <MenuItem Header="Expandir todas las notas adhesivas" Click="BtnExpandAllNotes_Click"/>
+                                <MenuItem Header="Contraer todas las notas adhesivas" Click="BtnCollapseAllNotes_Click"/>
                                 <Separator/>
                                 <MenuItem Header="Insertar imagen..." Click="BtnInsertImage_Click"/>
                             </ContextMenu>

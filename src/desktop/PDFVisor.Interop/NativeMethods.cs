@@ -108,6 +108,8 @@ internal struct PvPageObjectInfoNative
     public int Type;
     public PvRect Bounds;
     public float FontSize;
+    public uint ColorRgba;
+    public int Flags;
     public nint TextUtf8;
 }
 
@@ -116,8 +118,13 @@ public sealed record PdfPageObjectInfo(
     PdfPageObjectType Type,
     PvRect Bounds,
     float FontSize,
-    string Text)
+    string Text,
+    uint ColorRgba = 0x111111FF,
+    int Flags = 0)
 {
+    public bool IsUserAddedText => (Flags & 1) != 0;
+    public bool IsInvisible => (Flags & 2) != 0;
+    public string ColorHex => $"#{(ColorRgba >> 24) & 0xFF:X2}{(ColorRgba >> 16) & 0xFF:X2}{(ColorRgba >> 8) & 0xFF:X2}";
     public string DisplayLabel => Type switch
     {
         PdfPageObjectType.Text => $"[Texto {FontSize:0.#}pt] {(Text.Length > 40 ? Text[..40] + "…" : Text)}",
@@ -216,6 +223,10 @@ public sealed record PdfAnnotationInfo(
         PdfAnnotSubtype.Ink => "Trazo",
         _ => Subtype.ToString()
     };
+
+    public string ColorHex => $"#{(ColorRgba >> 24) & 0xFF:X2}{(ColorRgba >> 16) & 0xFF:X2}{(ColorRgba >> 8) & 0xFF:X2}";
+
+    public string HeaderLabel => $"Pág. {PageIndex + 1} • {TypeDisplay}";
 
     public string DisplaySummary => string.IsNullOrWhiteSpace(Contents)
         ? $"Pág. {PageIndex + 1} • {TypeDisplay}"
@@ -550,6 +561,19 @@ internal static class NativeMethods
         int pageIndex,
         int objIndex,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string newUtf8Text);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_update_text_object(
+        nint doc,
+        int pageIndex,
+        int objIndex,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? newUtf8TextOrNull,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? fallbackTtfPathUtf8OrNull,
+        float newFontSizeOrZero,
+        int updateColor,
+        uint newRgba,
+        double dxPt,
+        double dyPt);
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern PvStatus pv_page_move_object(

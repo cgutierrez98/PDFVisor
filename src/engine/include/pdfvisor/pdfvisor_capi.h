@@ -90,6 +90,8 @@ typedef struct pv_page_object_info_t {
     int32_t type;
     pv_rect_t bounds;
     float font_size;
+    uint32_t color_rgba;
+    int32_t flags; /* bit 0 (1): user-added text ("PVText"), bit 1 (2): invisible OCR text */
     char* text_utf8;
 } pv_page_object_info_t;
 
@@ -361,6 +363,18 @@ PV_API pv_status_t pv_page_edit_text_object(
     int32_t page_index,
     int32_t obj_index,
     const char* new_utf8_text);
+
+PV_API pv_status_t pv_page_update_text_object(
+    pv_document_handle doc,
+    int32_t page_index,
+    int32_t obj_index,
+    const char* new_utf8_text_or_null,
+    const char* fallback_ttf_path_utf8_or_null,
+    float new_font_size_or_zero,
+    int32_t update_color,
+    uint32_t new_rgba,
+    double dx_pt,
+    double dy_pt);
 
 PV_API pv_status_t pv_page_move_object(
     pv_document_handle doc,

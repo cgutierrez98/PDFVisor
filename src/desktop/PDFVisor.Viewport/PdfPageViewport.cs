@@ -42,6 +42,7 @@ public sealed class PdfPageViewport : ContentControl
         public Canvas OverlayCanvas { get; init; } = null!;
         public Canvas InteractiveCanvas { get; init; } = null!;
         public Dictionary<TileKey, Image> MountedTiles { get; } = new();
+        public List<UIElement> MountedNoteVisuals { get; } = [];
     }
 
     private enum DragTargetKind
@@ -49,7 +50,8 @@ public sealed class PdfPageViewport : ContentControl
         None,
         FormField,
         Annotation,
-        ImageObject
+        ImageObject,
+        TextObject
     }
 
     private readonly ScrollViewer _scrollViewer;
@@ -86,12 +88,14 @@ public sealed class PdfPageViewport : ContentControl
     private int _selCharCount;
     private IReadOnlyList<PvRect> _selRects = Array.Empty<PvRect>();
 
-    // Unified object dragging / resizing (AcroForm fields, Annotations, Image objects)
+    // Unified object dragging / resizing (AcroForm fields, Annotations, Image objects, Text objects)
     private DragTargetKind _dragKind = DragTargetKind.None;
     private bool _isResizingObject;
     private PdfFormField? _draggedFormField;
     private PdfAnnotationInfo? _draggedAnnotation;
     private PdfPageObjectInfo? _draggedImage;
+    private PdfPageObjectInfo? _draggedTextObject;
+    private bool _draggedTextWasAlreadySelected;
     private Rect _draggedObjectStartDip;
     private Rectangle? _objectDragPreview;
 
@@ -99,12 +103,28 @@ public sealed class PdfPageViewport : ContentControl
     private PdfFormField? _selectedFormField;
     private PdfAnnotationInfo? _selectedAnnotation;
     private (int PageIndex, PdfPageObjectInfo Obj)? _selectedImage;
+    private (int PageIndex, PdfPageObjectInfo Obj)? _selectedTextObject;
 
-    // Inline floating TextBox for direct AcroForm /Tx editing
+    // Inline floating TextBox for direct AcroForm /Tx or PDF Text Object creation/editing
     private TextBox? _inlineFieldEditor;
     private PdfFormField? _editingFormField;
     private int _editingFieldPageIndex = -1;
+    private FrameworkElement? _inlineTextOverlay;
+    private int _inlineTextPageIndex = -1;
+    private Action<bool>? _commitInlineTextAction;
     private bool _isCommittingInlineEditor;
+    private (int PageIndex, int AnnotIndex)? _pendingFocusNote;
+    private readonly List<Action> _activeNoteCommitters = [];
+
+    public void FocusStickyNote(int pageIndex, int annotIndex)
+    {
+        if (Session is null) return;
+        Session.ShowStickyNotes = true;
+        Session.CurrentPageIndex = pageIndex;
+        _pendingFocusNote = (pageIndex, annotIndex);
+        Session.SetStickyNoteExpanded(pageIndex, annotIndex, true);
+        RenderAllVisibleHighlights();
+    }
 
     private static readonly Brush TextSelectionBrush = new SolidColorBrush(Color.FromArgb(95, 0, 120, 215));
     private static readonly Brush MatchFillBrush = new SolidColorBrush(Color.FromArgb(95, 255, 215, 0));
@@ -125,6 +145,7 @@ public sealed class PdfPageViewport : ContentControl
     private static readonly Brush FormFieldHandleBrush = new SolidColorBrush(Color.FromRgb(25, 118, 210));
     private static readonly Brush NoteBadgeFillBrush = new SolidColorBrush(Color.FromArgb(75, 255, 193, 7));
     private static readonly Brush NoteBadgeStrokeBrush = new SolidColorBrush(Color.FromArgb(210, 245, 127, 23));
+    private static readonly Brush AddedTextHintBrush = new SolidColorBrush(Color.FromArgb(95, 0, 150, 136));
     private static readonly Brush SelectedObjectStrokeBrush = new SolidColorBrush(Color.FromRgb(0, 150, 136));
     private static readonly Brush PageBorderBrush = new SolidColorBrush(Color.FromArgb(70, 0, 0, 0));
 
@@ -151,6 +172,7 @@ public sealed class PdfPageViewport : ContentControl
         FormFieldHandleBrush.Freeze();
         NoteBadgeFillBrush.Freeze();
         NoteBadgeStrokeBrush.Freeze();
+        AddedTextHintBrush.Freeze();
         SelectedObjectStrokeBrush.Freeze();
         PageBorderBrush.Freeze();
     }
@@ -176,9 +198,14 @@ public sealed class PdfPageViewport : ContentControl
     public Action<string>? ExternalUriRequested { get; set; }
     public Action<int, PvRect>? SignatureRegionSelected { get; set; }
     public Action? ToolAutoReset { get; set; }
+    public Action? SelectionChanged { get; set; }
+
+    public (int PageIndex, PdfPageObjectInfo Obj)? SelectedTextObject => _selectedTextObject;
 
     public bool HasTextSelection => _selPageIndex >= 0 && _selRects.Count > 0;
-    public bool IsEditingInlineField => _inlineFieldEditor is not null && _inlineFieldEditor.IsKeyboardFocusWithin;
+    public bool IsEditingInlineField =>
+        (_inlineFieldEditor is not null && _inlineFieldEditor.IsKeyboardFocusWithin) ||
+        (Keyboard.FocusedElement is TextBox tb && Equals(tb.Tag, "StickyNoteEditor"));
 
     public PdfPageViewport()
     {
@@ -347,6 +374,11 @@ public sealed class PdfPageViewport : ContentControl
         {
             RenderAllVisibleHighlights();
         }
+        else if (e.PropertyName is nameof(DocumentSession.ShowStickyNotes)
+            or nameof(DocumentSession.StickyNotesViewRevision))
+        {
+            RenderAllVisibleHighlights();
+        }
         else if (e.PropertyName == nameof(DocumentSession.ActiveTool))
         {
             CommitAndCloseInlineEditor(save: true);
@@ -414,16 +446,23 @@ public sealed class PdfPageViewport : ContentControl
             return true;
         }
 
+        if (_selectedTextObject is { } selTxt)
+        {
+            ClearSelectedCanvasObject();
+            Session.RemovePageObjectUndoable(selTxt.PageIndex, selTxt.Obj.Index);
+            return true;
+        }
+
         if (_selectedImage is { } img)
         {
-            _selectedImage = null;
+            ClearSelectedCanvasObject();
             Session.RemovePageObjectUndoable(img.PageIndex, img.Obj.Index);
             return true;
         }
 
         if (_selectedFormField is { } field)
         {
-            _selectedFormField = null;
+            ClearSelectedCanvasObject();
             Session.RemoveFormField(field.Name);
             return true;
         }
@@ -431,11 +470,48 @@ public sealed class PdfPageViewport : ContentControl
         return false;
     }
 
-    private void ClearSelectedCanvasObject()
+    public void SelectTextObject(int pageIndex, PdfPageObjectInfo obj, bool openInlineEditor = false)
     {
+        if (Session is null) return;
+        CommitAndCloseInlineEditor(save: true);
+        Session.CurrentPageIndex = pageIndex;
         _selectedFormField = null;
         _selectedAnnotation = null;
         _selectedImage = null;
+        _selectedTextObject = (pageIndex, obj);
+        RenderAllVisibleHighlights();
+        SelectionChanged?.Invoke();
+
+        if (openInlineEditor && _activePages.TryGetValue(pageIndex, out var visual))
+        {
+            var pInfo = Session.Pages[pageIndex];
+            double scale = (96.0 / 72.0) * Session.Zoom;
+            var dipRect = PdfRectToDipRect(obj.Bounds, pInfo.WidthPt, pInfo.HeightPt, Session.Rotation, scale);
+            OpenInlineTextObjectEditor(visual, obj, dipRect.TopLeft, dipRect);
+        }
+    }
+
+    public bool UpdateSelectedTextStyle(float? newFontSize = null, uint? newColorRgba = null)
+    {
+        if (Session is null || _selectedTextObject is not { } sel) return false;
+        int pageIdx = sel.PageIndex;
+        int objIdx = sel.Obj.Index;
+        Session.UpdateTextObject(pageIdx, sel.Obj, newFontSize: newFontSize, newColorRgba: newColorRgba);
+        var refreshed = Session.GetTextObjectsForPage(pageIdx).FirstOrDefault(o => o.Index == objIdx);
+        _selectedTextObject = refreshed is not null ? (pageIdx, refreshed) : null;
+        RenderAllVisibleHighlights();
+        SelectionChanged?.Invoke();
+        return true;
+    }
+
+    private void ClearSelectedCanvasObject()
+    {
+        bool hadText = _selectedTextObject is not null;
+        _selectedFormField = null;
+        _selectedAnnotation = null;
+        _selectedImage = null;
+        _selectedTextObject = null;
+        if (hadText) SelectionChanged?.Invoke();
     }
 
     private void ResetViewportVisuals(bool clearCache)
@@ -598,7 +674,7 @@ public sealed class PdfPageViewport : ContentControl
         var toRemove = _activePages.Keys.Where(idx => !neededPages.Contains(idx)).ToList();
         foreach (int idx in toRemove)
         {
-            if (idx == _editingFieldPageIndex)
+            if (idx == _editingFieldPageIndex || idx == _inlineTextPageIndex)
             {
                 CommitAndCloseInlineEditor(save: true);
             }
@@ -869,6 +945,7 @@ public sealed class PdfPageViewport : ContentControl
 
     private void RenderAllVisibleHighlights()
     {
+        _activeNoteCommitters.Clear();
         foreach (var v in _activePages.Values)
         {
             RenderHighlightsForPage(v);
@@ -963,6 +1040,21 @@ public sealed class PdfPageViewport : ContentControl
 
     public void CommitAndCloseInlineEditor(bool save)
     {
+        if (save && _activeNoteCommitters.Count > 0)
+        {
+            foreach (var commit in _activeNoteCommitters.ToArray())
+            {
+                commit();
+            }
+        }
+
+        if (_commitInlineTextAction is not null)
+        {
+            var commitText = _commitInlineTextAction;
+            _commitInlineTextAction = null;
+            commitText(save);
+        }
+
         if (_isCommittingInlineEditor || _inlineFieldEditor is null) return;
         _isCommittingInlineEditor = true;
         try
@@ -1026,24 +1118,25 @@ public sealed class PdfPageViewport : ContentControl
             }
         }
 
-        // 1b. Render subtle interactive badges for Sticky Notes (/Text) + selected annotation outline
+        // 1b. Render selected non-Text annotation outline (Sticky Notes are rendered as interactive Post-its on InteractiveCanvas)
         foreach (var annot in session.GetInteractiveAnnotationsForPage(visual.PageIndex))
         {
-            var dipRect = PdfRectToDipRect(annot.Rect, origW, origH, rot, scale);
+            if (annot.Subtype == PdfAnnotSubtype.Text) continue;
+
             bool isSelected = _selectedAnnotation is not null &&
                               _selectedAnnotation.PageIndex == annot.PageIndex &&
                               _selectedAnnotation.Index == annot.Index;
-
-            if (annot.Subtype == PdfAnnotSubtype.Text || isSelected)
+            if (isSelected)
             {
+                var dipRect = PdfRectToDipRect(annot.Rect, origW, origH, rot, scale);
                 var badge = new Rectangle
                 {
                     Width = Math.Max(14, dipRect.Width),
                     Height = Math.Max(14, dipRect.Height),
-                    Fill = annot.Subtype == PdfAnnotSubtype.Text ? NoteBadgeFillBrush : Brushes.Transparent,
-                    Stroke = isSelected ? SelectedObjectStrokeBrush : NoteBadgeStrokeBrush,
-                    StrokeThickness = isSelected ? 1.8 : 1.1,
-                    StrokeDashArray = isSelected ? [3, 2] : null,
+                    Fill = Brushes.Transparent,
+                    Stroke = SelectedObjectStrokeBrush,
+                    StrokeThickness = 1.8,
+                    StrokeDashArray = [3, 2],
                     RadiusX = 3,
                     RadiusY = 3
                 };
@@ -1051,7 +1144,7 @@ public sealed class PdfPageViewport : ContentControl
                 Canvas.SetTop(badge, dipRect.Y);
                 visual.OverlayCanvas.Children.Add(badge);
 
-                if (isSelected && annot.Subtype == PdfAnnotSubtype.Square)
+                if (annot.Subtype == PdfAnnotSubtype.Square)
                 {
                     var handle = new Rectangle { Width = 7, Height = 7, Fill = SelectedObjectStrokeBrush };
                     Canvas.SetLeft(handle, dipRect.Right - 7);
@@ -1061,7 +1154,49 @@ public sealed class PdfPageViewport : ContentControl
             }
         }
 
-        // 1c. Render selected Image object frame + resize handle
+        MountStickyNotesForPage(visual, session, origW, origH, rot, scale);
+
+        // 1c. Render subtle frame for user-added text boxes + active selection frame & corner resize handle + floating toolbar
+        foreach (var txtObj in session.GetTextObjectsForPage(visual.PageIndex))
+        {
+            bool isSelTxt = _selectedTextObject is { } st && st.PageIndex == visual.PageIndex && st.Obj.Index == txtObj.Index;
+            if (!txtObj.IsUserAddedText && !isSelTxt) continue;
+            if (_inlineTextOverlay is not null && isSelTxt) continue;
+
+            var dipRect = PdfRectToDipRect(txtObj.Bounds, origW, origH, rot, scale);
+            var padded = new Rect(dipRect.X - 3, dipRect.Y - 2, Math.Max(18, dipRect.Width + 6), Math.Max(14, dipRect.Height + 4));
+            var outline = new Rectangle
+            {
+                Width = padded.Width,
+                Height = padded.Height,
+                Stroke = isSelTxt ? SelectedObjectStrokeBrush : AddedTextHintBrush,
+                StrokeThickness = isSelTxt ? 1.6 : 1.0,
+                StrokeDashArray = isSelTxt ? [4, 2] : [2, 3],
+                Fill = Brushes.Transparent,
+                RadiusX = 2,
+                RadiusY = 2
+            };
+            Canvas.SetLeft(outline, padded.X);
+            Canvas.SetTop(outline, padded.Y);
+            visual.OverlayCanvas.Children.Add(outline);
+
+            var handle = new Rectangle
+            {
+                Width = isSelTxt ? 8 : 6,
+                Height = isSelTxt ? 8 : 6,
+                Fill = isSelTxt ? SelectedObjectStrokeBrush : AddedTextHintBrush
+            };
+            Canvas.SetLeft(handle, padded.Right - (isSelTxt ? 8 : 6));
+            Canvas.SetTop(handle, padded.Bottom - (isSelTxt ? 8 : 6));
+            visual.OverlayCanvas.Children.Add(handle);
+
+            if (isSelTxt)
+            {
+                MountSelectedTextToolbarForPage(visual, session, txtObj, padded);
+            }
+        }
+
+        // 1c-bis. Render selected Image object frame + resize handle
         if (_selectedImage is { } selImg && selImg.PageIndex == visual.PageIndex)
         {
             var dipRect = PdfRectToDipRect(selImg.Obj.Bounds, origW, origH, rot, scale);
@@ -1156,6 +1291,10 @@ public sealed class PdfPageViewport : ContentControl
         {
             CommitAndCloseInlineEditor(save: true);
         }
+        if (_inlineTextOverlay is not null && !_inlineTextOverlay.IsMouseOver)
+        {
+            CommitAndCloseInlineEditor(save: true);
+        }
 
         Point pos = e.GetPosition(visual.SurfaceGrid);
 
@@ -1233,6 +1372,34 @@ public sealed class PdfPageViewport : ContentControl
                 return;
             }
 
+            // 3b. User-added Text Boxes (or any Text Object when holding Alt or already selected!) -> Move, Corner-Resize, or Double-Click Edit!
+            bool allowAnyTextObj = (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt;
+            if (HitTestTextObject(visual.PageIndex, pos, session, allowAnyTextObj, out var hitTxt, out var txtDipRect, out bool onTxtResize))
+            {
+                bool wasAlreadySelected = _selectedTextObject is { } prevSel &&
+                                          prevSel.PageIndex == visual.PageIndex &&
+                                          prevSel.Obj.Index == hitTxt.Index;
+                _selectedFormField = null;
+                _selectedAnnotation = null;
+                _selectedImage = null;
+                _selectedTextObject = (visual.PageIndex, hitTxt);
+                RenderAllVisibleHighlights();
+                SelectionChanged?.Invoke();
+
+                if (e.ClickCount >= 2 && !onTxtResize)
+                {
+                    OpenInlineTextObjectEditor(visual, hitTxt, txtDipRect.TopLeft, txtDipRect);
+                    e.Handled = true;
+                    return;
+                }
+
+                StartObjectDrag(visual, DragTargetKind.TextObject, txtDipRect, onTxtResize);
+                _draggedTextObject = hitTxt;
+                _draggedTextWasAlreadySelected = wasAlreadySelected;
+                e.Handled = true;
+                return;
+            }
+
             // 4. Text Selection if pointer is directly on text characters
             int charIdx = session.Document.GetCharIndexAtPos(visual.PageIndex, pt.X, pt.Y, tolerancePt: 10.0);
             if (charIdx >= 0)
@@ -1271,12 +1438,22 @@ public sealed class PdfPageViewport : ContentControl
 
         if (session.ActiveTool == AnnotationTool.Note)
         {
-            string? noteText = PromptNoteText is not null ? PromptNoteText() : "Nota";
-            if (!string.IsNullOrWhiteSpace(noteText))
+            var pt = DipPointToPdfPoint(pos, visual.PageIndex, session);
+            session.CurrentPageIndex = visual.PageIndex;
+            int newIdx = session.AddNote(
+                new PvRect { Left = pt.X, Bottom = pt.Y - 24, Right = pt.X + 24, Top = pt.Y },
+                string.Empty,
+                session.ActiveColorRgba,
+                targetPageIndex: visual.PageIndex,
+                expandCard: true);
+
+            session.ActiveTool = AnnotationTool.None;
+            ToolAutoReset?.Invoke();
+
+            if (newIdx >= 0)
             {
-                var pt = DipPointToPdfPoint(pos, visual.PageIndex, session);
-                session.CurrentPageIndex = visual.PageIndex;
-                session.AddNote(new PvRect { Left = pt.X, Bottom = pt.Y - 24, Right = pt.X + 24, Top = pt.Y }, noteText, session.ActiveColorRgba);
+                _pendingFocusNote = (visual.PageIndex, newIdx);
+                RenderAllVisibleHighlights();
             }
             e.Handled = true;
             return;
@@ -1284,12 +1461,19 @@ public sealed class PdfPageViewport : ContentControl
 
         if (session.ActiveTool == AnnotationTool.AddText)
         {
-            string? newText = PromptAddText is not null ? PromptAddText() : "Texto";
-            if (!string.IsNullOrWhiteSpace(newText))
+            session.CurrentPageIndex = visual.PageIndex;
+            session.ActiveTool = AnnotationTool.None;
+            ToolAutoReset?.Invoke();
+
+            // If user clicked directly on an existing user-added text box with AddText tool, edit it in-place; otherwise create new!
+            if (HitTestTextObject(visual.PageIndex, pos, session, includeAllPdfText: false, out var existingTxt, out var existingDip, out _))
             {
-                var pt = DipPointToPdfPoint(pos, visual.PageIndex, session);
-                session.CurrentPageIndex = visual.PageIndex;
-                session.AddTextObject(newText, pt.X, pt.Y, "Helvetica", session.ActiveFontSize, session.ActiveColorRgba);
+                _selectedTextObject = (visual.PageIndex, existingTxt);
+                OpenInlineTextObjectEditor(visual, existingTxt, existingDip.TopLeft, existingDip);
+            }
+            else
+            {
+                OpenInlineTextObjectEditor(visual, existingObj: null, anchorDip: pos, existingDipRect: null);
             }
             e.Handled = true;
             return;
@@ -1468,6 +1652,13 @@ public sealed class PdfPageViewport : ContentControl
             return;
         }
 
+        bool allowAllTxt = (Keyboard.Modifiers & ModifierKeys.Alt) == ModifierKeys.Alt;
+        if (HitTestTextObject(visual.PageIndex, hoverPos, session, allowAllTxt, out _, out _, out bool onTxtResize))
+        {
+            visual.SurfaceGrid.Cursor = onTxtResize ? Cursors.SizeNWSE : Cursors.SizeAll;
+            return;
+        }
+
         if (session.Document.GetCharIndexAtPos(visual.PageIndex, hoverPt.X, hoverPt.Y, tolerancePt: 8.0) >= 0)
         {
             visual.SurfaceGrid.Cursor = Cursors.IBeam;
@@ -1491,11 +1682,13 @@ public sealed class PdfPageViewport : ContentControl
             var field = _draggedFormField;
             var annot = _draggedAnnotation;
             var img = _draggedImage;
+            var txtObj = _draggedTextObject;
 
             _dragKind = DragTargetKind.None;
             _draggedFormField = null;
             _draggedAnnotation = null;
             _draggedImage = null;
+            _draggedTextObject = null;
             _drawingPage = null;
             visual.SurfaceGrid.ReleaseMouseCapture();
 
@@ -1538,6 +1731,29 @@ public sealed class PdfPageViewport : ContentControl
                     var refreshed = Session.GetImageObjectsForPage(visual.PageIndex).FirstOrDefault(o => o.Index == img.Index);
                     if (refreshed is not null) _selectedImage = (visual.PageIndex, refreshed);
                 }
+                else if (kind == DragTargetKind.TextObject && txtObj is not null)
+                {
+                    if (_isResizingObject)
+                    {
+                        double dh = Math.Abs(finalDip.Height - _draggedObjectStartDip.Height);
+                        double dw = Math.Abs(finalDip.Width - _draggedObjectStartDip.Width);
+                        double ratio = dh >= dw
+                            ? (finalDip.Height / Math.Max(8.0, _draggedObjectStartDip.Height))
+                            : (finalDip.Width / Math.Max(14.0, _draggedObjectStartDip.Width));
+                        float scaledFontPt = Math.Clamp((float)Math.Round(Math.Max(6f, txtObj.FontSize) * ratio, 1), 6f, 144f);
+                        Session.UpdateTextObject(visual.PageIndex, txtObj, newFontSize: scaledFontPt);
+                    }
+                    else
+                    {
+                        var startPdf = DipPointToPdfPoint(_draggedObjectStartDip.TopLeft, visual.PageIndex, Session);
+                        var endPdf = DipPointToPdfPoint(finalDip.TopLeft, visual.PageIndex, Session);
+                        Session.UpdateTextObject(visual.PageIndex, txtObj, dxPt: endPdf.X - startPdf.X, dyPt: endPdf.Y - startPdf.Y);
+                    }
+                    var refreshedTxt = Session.GetTextObjectsForPage(visual.PageIndex).FirstOrDefault(o => o.Index == txtObj.Index);
+                    _selectedTextObject = refreshedTxt is not null ? (visual.PageIndex, refreshedTxt) : null;
+                    RenderAllVisibleHighlights();
+                    SelectionChanged?.Invoke();
+                }
             }
             else if (!_isResizingObject)
             {
@@ -1560,6 +1776,10 @@ public sealed class PdfPageViewport : ContentControl
                     {
                         Session.UpdateExistingAnnotation(annot, newContents: edited);
                     }
+                }
+                else if (kind == DragTargetKind.TextObject && txtObj is not null && _draggedTextWasAlreadySelected)
+                {
+                    OpenInlineTextObjectEditor(visual, txtObj, _draggedObjectStartDip.TopLeft, _draggedObjectStartDip);
                 }
             }
 
@@ -1807,6 +2027,7 @@ public sealed class PdfPageViewport : ContentControl
 
         for (int i = annots.Count - 1; i >= 0; i--)
         {
+            if (annots[i].Subtype == PdfAnnotSubtype.Text) continue; // Handled directly by InteractiveCanvas Post-it controls
             var r = PdfRectToDipRect(annots[i].Rect, pageInfo.WidthPt, pageInfo.HeightPt, session.Rotation, scale);
             double w = Math.Max(16, r.Width);
             double h = Math.Max(16, r.Height);
@@ -1820,6 +2041,439 @@ public sealed class PdfPageViewport : ContentControl
             }
         }
         return false;
+    }
+
+    private void MountStickyNotesForPage(
+        ActivePageVisual visual,
+        DocumentSession session,
+        double origW,
+        double origH,
+        int rot,
+        double scale)
+    {
+        foreach (var old in visual.MountedNoteVisuals)
+        {
+            visual.InteractiveCanvas.Children.Remove(old);
+        }
+        visual.MountedNoteVisuals.Clear();
+
+        if (!session.ShowStickyNotes) return;
+
+        var notes = session.GetInteractiveAnnotationsForPage(visual.PageIndex)
+            .Where(a => a.Subtype == PdfAnnotSubtype.Text)
+            .ToArray();
+        if (notes.Length == 0) return;
+
+        double pageWidthDip = visual.InteractiveCanvas.Width > 0 ? visual.InteractiveCanvas.Width : origW * scale;
+        double pageHeightDip = visual.InteractiveCanvas.Height > 0 ? visual.InteractiveCanvas.Height : origH * scale;
+        var iconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
+
+        foreach (var note in notes)
+        {
+            var rawDip = PdfRectToDipRect(note.Rect, origW, origH, rot, scale);
+            const double pinSize = 28.0;
+            double pinLeft = Math.Clamp(rawDip.X, 4.0, Math.Max(4.0, pageWidthDip - pinSize - 4.0));
+            double pinTop = Math.Clamp(rawDip.Y, 4.0, Math.Max(4.0, pageHeightDip - pinSize - 4.0));
+
+            byte cr = (byte)((note.ColorRgba >> 24) & 0xFF);
+            byte cg = (byte)((note.ColorRgba >> 16) & 0xFF);
+            byte cb = (byte)((note.ColorRgba >> 8) & 0xFF);
+            var baseColor = Color.FromRgb(cr, cg, cb);
+            var borderColor = Color.FromRgb((byte)(cr * 0.72), (byte)(cg * 0.72), (byte)(cb * 0.72));
+            bool isLightBg = (0.299 * cr + 0.587 * cg + 0.114 * cb) > 145.0;
+            var iconFg = isLightBg ? new SolidColorBrush(Color.FromRgb(30, 32, 36)) : Brushes.White;
+            bool isExpanded = session.IsStickyNoteExpanded(note.PageIndex, note.Index);
+
+            // 1. Crisp Vector Sticky Note Pin
+            var pinGrid = new Grid();
+            pinGrid.Children.Add(new TextBlock
+            {
+                FontFamily = iconFont,
+                Text = isExpanded ? "\uE90A" : "\uE70B",
+                FontSize = 14,
+                Foreground = iconFg,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            if (!string.IsNullOrWhiteSpace(note.Contents) && !isExpanded)
+            {
+                var dot = new Ellipse
+                {
+                    Width = 6,
+                    Height = 6,
+                    Fill = isLightBg ? new SolidColorBrush(Color.FromRgb(217, 38, 56)) : Brushes.White,
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    VerticalAlignment = VerticalAlignment.Top,
+                    Margin = new Thickness(0, 2, 2, 0)
+                };
+                pinGrid.Children.Add(dot);
+            }
+
+            var tooltipStack = new StackPanel { MaxWidth = 280 };
+            tooltipStack.Children.Add(new TextBlock
+            {
+                Text = $"Nota adhesiva (Pág. {note.PageIndex + 1})",
+                FontWeight = FontWeights.SemiBold,
+                FontSize = 12,
+                Margin = new Thickness(0, 0, 0, 3)
+            });
+            tooltipStack.Children.Add(new TextBlock
+            {
+                Text = string.IsNullOrWhiteSpace(note.Contents) ? "(Sin texto — haz clic para escribir)" : note.Contents,
+                TextWrapping = TextWrapping.Wrap,
+                FontSize = 12
+            });
+            tooltipStack.Children.Add(new TextBlock
+            {
+                Text = "Clic: abrir/contraer Post-it • Arrastrar: mover",
+                Opacity = 0.68,
+                FontSize = 10.5,
+                Margin = new Thickness(0, 5, 0, 0)
+            });
+
+            var pinBorder = new Border
+            {
+                Width = pinSize,
+                Height = pinSize,
+                CornerRadius = new CornerRadius(7, 7, 7, 2),
+                Background = new SolidColorBrush(baseColor),
+                BorderBrush = new SolidColorBrush(borderColor),
+                BorderThickness = new Thickness(1.5),
+                Cursor = Cursors.Hand,
+                Child = pinGrid,
+                ToolTip = tooltipStack,
+                Effect = new System.Windows.Media.Effects.DropShadowEffect
+                {
+                    BlurRadius = 8,
+                    ShadowDepth = 2,
+                    Opacity = 0.34,
+                    Color = Colors.Black
+                }
+            };
+
+            Canvas.SetLeft(pinBorder, pinLeft);
+            Canvas.SetTop(pinBorder, pinTop);
+            Panel.SetZIndex(pinBorder, isExpanded ? 30 : 20);
+
+            Border? cardBorder = null;
+            const double cardWidth = 236.0;
+            double ComputeCardLeft(double pLeft) =>
+                (pLeft + pinSize + 8 + cardWidth <= pageWidthDip - 6)
+                    ? (pLeft + pinSize + 8)
+                    : Math.Max(6.0, pLeft - cardWidth - 8);
+            double ComputeCardTop(double pTop) =>
+                Math.Clamp(pTop, 6.0, Math.Max(6.0, pageHeightDip - 155.0));
+
+            // Shared drag/click helper for both the Pin and the Post-it Header Bar
+            void AttachNoteDragBehavior(FrameworkElement handleElement, bool toggleOnClick)
+            {
+                bool draggingNote = false;
+                Point startMousePage = default;
+                double startPinL = 0, startPinT = 0;
+
+                handleElement.MouseLeftButtonDown += (_, me) =>
+                {
+                    draggingNote = true;
+                    startMousePage = me.GetPosition(visual.InteractiveCanvas);
+                    startPinL = Canvas.GetLeft(pinBorder);
+                    startPinT = Canvas.GetTop(pinBorder);
+                    _selectedAnnotation = note;
+                    handleElement.CaptureMouse();
+                    me.Handled = true;
+                };
+
+                handleElement.MouseMove += (_, me) =>
+                {
+                    if (!draggingNote) return;
+                    Point cur = me.GetPosition(visual.InteractiveCanvas);
+                    double nl = Math.Clamp(startPinL + (cur.X - startMousePage.X), 4.0, Math.Max(4.0, pageWidthDip - pinSize - 4.0));
+                    double nt = Math.Clamp(startPinT + (cur.Y - startMousePage.Y), 4.0, Math.Max(4.0, pageHeightDip - pinSize - 4.0));
+                    Canvas.SetLeft(pinBorder, nl);
+                    Canvas.SetTop(pinBorder, nt);
+                    if (cardBorder is not null)
+                    {
+                        Canvas.SetLeft(cardBorder, ComputeCardLeft(nl));
+                        Canvas.SetTop(cardBorder, ComputeCardTop(nt));
+                    }
+                    me.Handled = true;
+                };
+
+                handleElement.MouseLeftButtonUp += (_, me) =>
+                {
+                    if (!draggingNote) return;
+                    draggingNote = false;
+                    handleElement.ReleaseMouseCapture();
+
+                    double endL = Canvas.GetLeft(pinBorder);
+                    double endT = Canvas.GetTop(pinBorder);
+                    bool moved = Math.Abs(endL - startPinL) >= 2.5 || Math.Abs(endT - startPinT) >= 2.5;
+                    if (moved)
+                    {
+                        var p1 = DipPointToPdfPoint(new Point(endL, endT), visual.PageIndex, session);
+                        var p2 = DipPointToPdfPoint(new Point(endL + 24.0 * (scale / (96.0 / 72.0)), endT + 24.0 * (scale / (96.0 / 72.0))), visual.PageIndex, session);
+                        var newRect = new PvRect
+                        {
+                            Left = Math.Min(p1.X, p2.X),
+                            Right = Math.Max(p1.X, p2.X),
+                            Bottom = Math.Min(p1.Y, p2.Y),
+                            Top = Math.Max(p1.Y, p2.Y)
+                        };
+                        bool wasOpen = session.IsStickyNoteExpanded(note.PageIndex, note.Index);
+                        session.UpdateExistingAnnotation(note, newRect: newRect);
+                        session.SetStickyNoteExpanded(note.PageIndex, note.Index, wasOpen);
+                    }
+                    else if (toggleOnClick)
+                    {
+                        session.ToggleStickyNoteExpanded(note.PageIndex, note.Index);
+                    }
+                    me.Handled = true;
+                };
+            }
+
+            AttachNoteDragBehavior(pinBorder, toggleOnClick: true);
+            visual.InteractiveCanvas.Children.Add(pinBorder);
+            visual.MountedNoteVisuals.Add(pinBorder);
+
+            // 2. Expanded Post-it Card directly on the page!
+            if (isExpanded)
+            {
+                // Soft pastel paper tinted with 18% of the note's accent color
+                var paperColor = Color.FromRgb(
+                    (byte)((255 * 82 + cr * 18) / 100),
+                    (byte)((253 * 82 + cg * 18) / 100),
+                    (byte)((242 * 82 + cb * 18) / 100));
+                var headerColor = Color.FromRgb(
+                    (byte)((255 * 45 + cr * 55) / 100),
+                    (byte)((252 * 45 + cg * 55) / 100),
+                    (byte)((235 * 45 + cb * 55) / 100));
+
+                var cardStack = new DockPanel();
+
+                // Header bar with quick color dots + Minimize + Delete
+                var headerDock = new DockPanel
+                {
+                    Background = new SolidColorBrush(headerColor),
+                    Cursor = Cursors.SizeAll,
+                    Margin = new Thickness(0),
+                    LastChildFill = false
+                };
+
+                var swatchesPanel = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(8, 5, 4, 5)
+                };
+
+                (uint Rgba, Color Swatch, string Tip)[] postItPalette =
+                [
+                    (0xFFCA28FFu, Color.FromRgb(255, 202, 40), "Amarillo"),
+                    (0x43A047FFu, Color.FromRgb(67, 160, 71), "Verde"),
+                    (0x1E88E5FFu, Color.FromRgb(30, 136, 229), "Azul"),
+                    (0xE53935FFu, Color.FromRgb(229, 57, 53), "Rojo"),
+                    (0xFB8C00FFu, Color.FromRgb(251, 140, 0), "Naranja")
+                ];
+
+                var noteTextBox = new TextBox
+                {
+                    Tag = "StickyNoteEditor",
+                    Text = note.Contents ?? string.Empty,
+                    AcceptsReturn = true,
+                    TextWrapping = TextWrapping.Wrap,
+                    VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                    MinHeight = 92,
+                    MaxHeight = 190,
+                    FontSize = 12.5,
+                    Foreground = new SolidColorBrush(Color.FromRgb(26, 29, 33)),
+                    CaretBrush = new SolidColorBrush(Color.FromRgb(26, 29, 33)),
+                    Background = Brushes.Transparent,
+                    BorderThickness = new Thickness(0),
+                    Padding = new Thickness(8, 6, 8, 8)
+                };
+
+                void CommitNoteTextIfChanged()
+                {
+                    string currentText = noteTextBox.Text ?? string.Empty;
+                    if (!string.Equals(currentText, note.Contents, StringComparison.Ordinal))
+                    {
+                        bool keepOpen = session.IsStickyNoteExpanded(note.PageIndex, note.Index);
+                        session.UpdateExistingAnnotation(note, newContents: currentText);
+                        session.SetStickyNoteExpanded(note.PageIndex, note.Index, keepOpen);
+                    }
+                }
+                _activeNoteCommitters.Add(CommitNoteTextIfChanged);
+
+                foreach (var (rgba, swColor, tip) in postItPalette)
+                {
+                    var dotBtn = new Border
+                    {
+                        Width = 13,
+                        Height = 13,
+                        CornerRadius = new CornerRadius(6.5),
+                        Background = new SolidColorBrush(swColor),
+                        BorderBrush = new SolidColorBrush(Color.FromArgb(130, 0, 0, 0)),
+                        BorderThickness = new Thickness(1),
+                        Margin = new Thickness(0, 0, 5, 0),
+                        Cursor = Cursors.Hand,
+                        ToolTip = $"Color: {tip}"
+                    };
+                    dotBtn.MouseLeftButtonDown += (_, me) =>
+                    {
+                        me.Handled = true;
+                        string latestText = noteTextBox.Text ?? string.Empty;
+                        session.UpdateExistingAnnotation(
+                            note,
+                            newContents: latestText != note.Contents ? latestText : null,
+                            newColor: rgba);
+                        session.SetStickyNoteExpanded(note.PageIndex, note.Index, true);
+                    };
+                    swatchesPanel.Children.Add(dotBtn);
+                }
+                DockPanel.SetDock(swatchesPanel, Dock.Left);
+                headerDock.Children.Add(swatchesPanel);
+
+                var actionsPanel = new StackPanel
+                {
+                    Orientation = Orientation.Horizontal,
+                    VerticalAlignment = VerticalAlignment.Center,
+                    Margin = new Thickness(0, 2, 4, 2)
+                };
+
+                var btnCollapse = new Border
+                {
+                    Width = 22,
+                    Height = 22,
+                    CornerRadius = new CornerRadius(4),
+                    Background = Brushes.Transparent,
+                    Cursor = Cursors.Hand,
+                    ToolTip = "Contraer Post-it a icono",
+                    Child = new TextBlock
+                    {
+                        FontFamily = iconFont,
+                        Text = "\uE921", // ChromeMinimize
+                        FontSize = 10,
+                        Foreground = new SolidColorBrush(Color.FromRgb(35, 38, 42)),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    }
+                };
+                btnCollapse.MouseLeftButtonDown += (_, me) =>
+                {
+                    me.Handled = true;
+                    CommitNoteTextIfChanged();
+                    session.SetStickyNoteExpanded(note.PageIndex, note.Index, false);
+                };
+
+                var btnDelete = new Border
+                {
+                    Width = 22,
+                    Height = 22,
+                    CornerRadius = new CornerRadius(4),
+                    Background = Brushes.Transparent,
+                    Cursor = Cursors.Hand,
+                    ToolTip = "Eliminar nota adhesiva",
+                    Child = new TextBlock
+                    {
+                        FontFamily = iconFont,
+                        Text = "\uE74D", // Delete trash
+                        FontSize = 11,
+                        Foreground = new SolidColorBrush(Color.FromRgb(185, 28, 28)),
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center
+                    }
+                };
+                btnDelete.MouseLeftButtonDown += (_, me) =>
+                {
+                    me.Handled = true;
+                    session.DeleteExistingAnnotation(note);
+                };
+
+                actionsPanel.Children.Add(btnCollapse);
+                actionsPanel.Children.Add(btnDelete);
+                DockPanel.SetDock(actionsPanel, Dock.Right);
+                headerDock.Children.Add(actionsPanel);
+
+                AttachNoteDragBehavior(headerDock, toggleOnClick: false);
+                DockPanel.SetDock(headerDock, Dock.Top);
+                cardStack.Children.Add(headerDock);
+
+                // Multiline Body with subtle placeholder
+                var bodyGrid = new Grid();
+                var placeholder = new TextBlock
+                {
+                    Text = "Escribe tu nota adhesiva aquí...",
+                    Foreground = new SolidColorBrush(Color.FromArgb(120, 45, 48, 52)),
+                    FontSize = 12.5,
+                    FontStyle = FontStyles.Italic,
+                    Margin = new Thickness(10, 8, 10, 8),
+                    IsHitTestVisible = false,
+                    Visibility = string.IsNullOrEmpty(note.Contents) ? Visibility.Visible : Visibility.Collapsed
+                };
+
+                noteTextBox.TextChanged += (_, _) =>
+                {
+                    placeholder.Visibility = string.IsNullOrEmpty(noteTextBox.Text) ? Visibility.Visible : Visibility.Collapsed;
+                };
+                noteTextBox.LostFocus += (_, _) => CommitNoteTextIfChanged();
+                noteTextBox.KeyDown += (_, ke) =>
+                {
+                    if (ke.Key == Key.Escape)
+                    {
+                        ke.Handled = true;
+                        CommitNoteTextIfChanged();
+                        session.SetStickyNoteExpanded(note.PageIndex, note.Index, false);
+                    }
+                    else if (ke.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.Control)
+                    {
+                        ke.Handled = true;
+                        CommitNoteTextIfChanged();
+                        Keyboard.ClearFocus();
+                    }
+                };
+
+                bodyGrid.Children.Add(placeholder);
+                bodyGrid.Children.Add(noteTextBox);
+                cardStack.Children.Add(bodyGrid);
+
+                cardBorder = new Border
+                {
+                    Width = cardWidth,
+                    CornerRadius = new CornerRadius(6),
+                    Background = new SolidColorBrush(paperColor),
+                    BorderBrush = new SolidColorBrush(borderColor),
+                    BorderThickness = new Thickness(1.2),
+                    ClipToBounds = false,
+                    Child = cardStack,
+                    Effect = new System.Windows.Media.Effects.DropShadowEffect
+                    {
+                        BlurRadius = 16,
+                        ShadowDepth = 4,
+                        Opacity = 0.30,
+                        Color = Colors.Black
+                    }
+                };
+                cardBorder.MouseLeftButtonDown += (_, me) => me.Handled = true;
+
+                Canvas.SetLeft(cardBorder, ComputeCardLeft(pinLeft));
+                Canvas.SetTop(cardBorder, ComputeCardTop(pinTop));
+                Panel.SetZIndex(cardBorder, 40);
+
+                visual.InteractiveCanvas.Children.Add(cardBorder);
+                visual.MountedNoteVisuals.Add(cardBorder);
+
+                if (_pendingFocusNote is { } pf && pf.PageIndex == note.PageIndex && pf.AnnotIndex == note.Index)
+                {
+                    _pendingFocusNote = null;
+                    var tbToFocus = noteTextBox;
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        tbToFocus.Focus();
+                        tbToFocus.CaretIndex = tbToFocus.Text.Length;
+                    }, System.Windows.Threading.DispatcherPriority.Input);
+                }
+            }
+        }
     }
 
     private bool HitTestImageObject(
@@ -1854,6 +2508,455 @@ public sealed class PdfPageViewport : ContentControl
             }
         }
         return false;
+    }
+
+    private bool HitTestTextObject(
+        int pageIndex,
+        Point dipPos,
+        DocumentSession session,
+        bool includeAllPdfText,
+        out PdfPageObjectInfo hitTxt,
+        out Rect txtDipRect,
+        out bool onResizeHandle)
+    {
+        hitTxt = null!;
+        txtDipRect = default;
+        onResizeHandle = false;
+
+        var texts = session.GetTextObjectsForPage(pageIndex);
+        if (texts.Count == 0) return false;
+
+        var pageInfo = session.Pages[pageIndex];
+        double scale = (96.0 / 72.0) * session.Zoom;
+
+        for (int i = texts.Count - 1; i >= 0; i--)
+        {
+            var t = texts[i];
+            bool isSelected = _selectedTextObject is { } sel && sel.PageIndex == pageIndex && sel.Obj.Index == t.Index;
+            if (!includeAllPdfText && !t.IsUserAddedText && !isSelected) continue;
+
+            var r = PdfRectToDipRect(t.Bounds, pageInfo.WidthPt, pageInfo.HeightPt, session.Rotation, scale);
+            var padded = new Rect(r.X - 4, r.Y - 3, Math.Max(20, r.Width + 8), Math.Max(16, r.Height + 6));
+            if (padded.Contains(dipPos))
+            {
+                hitTxt = t;
+                txtDipRect = padded;
+                onResizeHandle = dipPos.X >= padded.Right - 12 && dipPos.Y >= padded.Bottom - 12;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Brush CreateFormatBarPillButton(
+        string label,
+        string tooltip,
+        FontFamily? fontFamily,
+        double fontSize,
+        Color fgColor,
+        MouseButtonEventHandler onClick,
+        out Border buttonBorder)
+    {
+        var fg = new SolidColorBrush(fgColor);
+        buttonBorder = new Border
+        {
+            CornerRadius = new CornerRadius(4),
+            Background = Brushes.Transparent,
+            Padding = new Thickness(6, 3, 6, 3),
+            Margin = new Thickness(1, 0, 1, 0),
+            Cursor = Cursors.Hand,
+            ToolTip = tooltip,
+            Child = new TextBlock
+            {
+                Text = label,
+                FontFamily = fontFamily ?? new FontFamily("Segoe UI"),
+                FontSize = fontSize,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = fg,
+                VerticalAlignment = VerticalAlignment.Center
+            }
+        };
+        var captured = buttonBorder;
+        buttonBorder.MouseEnter += (_, _) => captured.Background = new SolidColorBrush(Color.FromArgb(40, 128, 128, 128));
+        buttonBorder.MouseLeave += (_, _) => captured.Background = Brushes.Transparent;
+        buttonBorder.MouseLeftButtonDown += onClick;
+        return fg;
+    }
+
+    private void MountSelectedTextToolbarForPage(
+        ActivePageVisual visual,
+        DocumentSession session,
+        PdfPageObjectInfo txtObj,
+        Rect paddedDipRect)
+    {
+        var iconFont = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets");
+        var barRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+
+        // 1. Edit text inline button
+        CreateFormatBarPillButton("\uE70F", "Editar texto (o doble clic)", iconFont, 12, Color.FromRgb(25, 118, 210), (_, me) =>
+        {
+            me.Handled = true;
+            OpenInlineTextObjectEditor(visual, txtObj, paddedDipRect.TopLeft, paddedDipRect);
+        }, out var btnEdit);
+        barRow.Children.Add(btnEdit);
+
+        // 2. Font size - / label / +
+        float curSize = Math.Max(6f, (float)Math.Round(txtObj.FontSize, 1));
+        CreateFormatBarPillButton("A-", "Reducir tamaño de fuente", null, 11.5, Color.FromRgb(30, 32, 36), (_, me) =>
+        {
+            me.Handled = true;
+            UpdateSelectedTextStyle(newFontSize: Math.Max(6f, curSize - 2f));
+        }, out var btnDec);
+        barRow.Children.Add(btnDec);
+
+        barRow.Children.Add(new TextBlock
+        {
+            Text = $"{Math.Round(curSize)} pt",
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(70, 74, 80)),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(3, 0, 3, 0)
+        });
+
+        CreateFormatBarPillButton("A+", "Aumentar tamaño de fuente", null, 11.5, Color.FromRgb(30, 32, 36), (_, me) =>
+        {
+            me.Handled = true;
+            UpdateSelectedTextStyle(newFontSize: Math.Min(144f, curSize + 2f));
+        }, out var btnInc);
+        barRow.Children.Add(btnInc);
+
+        barRow.Children.Add(new Border
+        {
+            Width = 1,
+            Height = 14,
+            Background = new SolidColorBrush(Color.FromArgb(60, 0, 0, 0)),
+            Margin = new Thickness(5, 0, 5, 0)
+        });
+
+        // 3. Quick 5 Color Dots
+        (uint Rgba, Color Swatch, string Tip)[] textPalette =
+        [
+            (0x181818FFu, Color.FromRgb(24, 24, 24), "Negro"),
+            (0x1E88E5FFu, Color.FromRgb(30, 136, 229), "Azul"),
+            (0xE53935FFu, Color.FromRgb(229, 57, 53), "Rojo"),
+            (0x43A047FFu, Color.FromRgb(67, 160, 71), "Verde"),
+            (0xFB8C00FFu, Color.FromRgb(251, 140, 0), "Naranja")
+        ];
+
+        foreach (var (rgba, swColor, tip) in textPalette)
+        {
+            var dot = new Border
+            {
+                Width = 13,
+                Height = 13,
+                CornerRadius = new CornerRadius(6.5),
+                Background = new SolidColorBrush(swColor),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(120, 0, 0, 0)),
+                BorderThickness = new Thickness(1),
+                Margin = new Thickness(2, 0, 2, 0),
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center,
+                ToolTip = $"Color: {tip}"
+            };
+            dot.MouseLeftButtonDown += (_, me) =>
+            {
+                me.Handled = true;
+                session.ActiveColorRgba = rgba;
+                UpdateSelectedTextStyle(newColorRgba: rgba);
+            };
+            barRow.Children.Add(dot);
+        }
+
+        barRow.Children.Add(new Border
+        {
+            Width = 1,
+            Height = 14,
+            Background = new SolidColorBrush(Color.FromArgb(60, 0, 0, 0)),
+            Margin = new Thickness(5, 0, 3, 0)
+        });
+
+        // 4. Delete button
+        CreateFormatBarPillButton("\uE74D", "Eliminar texto (Supr)", iconFont, 12, Color.FromRgb(198, 40, 40), (_, me) =>
+        {
+            me.Handled = true;
+            DeleteSelectedCanvasItem();
+        }, out var btnDel);
+        barRow.Children.Add(btnDel);
+
+        var pillBorder = new Border
+        {
+            CornerRadius = new CornerRadius(6),
+            Background = new SolidColorBrush(Color.FromRgb(250, 251, 253)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(90, 0, 0, 0)),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(4, 2, 4, 2),
+            Child = barRow,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                BlurRadius = 12,
+                ShadowDepth = 3,
+                Opacity = 0.25,
+                Color = Colors.Black
+            }
+        };
+        pillBorder.MouseLeftButtonDown += (_, me) => me.Handled = true;
+
+        double pageW = visual.InteractiveCanvas.Width > 0 ? visual.InteractiveCanvas.Width : 800;
+        double barLeft = Math.Clamp(paddedDipRect.X, 4.0, Math.Max(4.0, pageW - 255.0));
+        double barTop = paddedDipRect.Y >= 36.0 ? (paddedDipRect.Y - 34.0) : (paddedDipRect.Bottom + 6.0);
+
+        Canvas.SetLeft(pillBorder, barLeft);
+        Canvas.SetTop(pillBorder, barTop);
+        Panel.SetZIndex(pillBorder, 45);
+
+        visual.InteractiveCanvas.Children.Add(pillBorder);
+        visual.MountedNoteVisuals.Add(pillBorder);
+    }
+
+    private void OpenInlineTextObjectEditor(
+        ActivePageVisual visual,
+        PdfPageObjectInfo? existingObj,
+        Point anchorDip,
+        Rect? existingDipRect)
+    {
+        CommitAndCloseInlineEditor(save: true);
+        var session = Session;
+        if (session is null) return;
+
+        double scale = (96.0 / 72.0) * session.Zoom;
+        float workingSizePt = existingObj is not null
+            ? Math.Clamp(existingObj.FontSize, 6f, 144f)
+            : session.ActiveFontSize;
+
+        // Avoid defaulting new text to pale Post-it yellow (#FFCA28) on white paper unless editing an already-yellow object
+        uint workingColorRgba = existingObj is not null
+            ? existingObj.ColorRgba
+            : (session.ActiveColorRgba == 0xFFCA28FFu ? 0x181818FFu : session.ActiveColorRgba);
+
+        Color RgbaToColor(uint rgba) =>
+            Color.FromRgb((byte)((rgba >> 24) & 0xFF), (byte)((rgba >> 16) & 0xFF), (byte)((rgba >> 8) & 0xFF));
+
+        var sizeLabel = new TextBlock
+        {
+            Text = $"{Math.Round(workingSizePt)} pt",
+            FontSize = 11,
+            Foreground = new SolidColorBrush(Color.FromRgb(70, 74, 80)),
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(3, 0, 3, 0)
+        };
+
+        var editorBox = new TextBox
+        {
+            Tag = "StickyNoteEditor",
+            Text = existingObj?.Text ?? string.Empty,
+            MinWidth = Math.Max(150, existingDipRect?.Width ?? 150),
+            MaxWidth = Math.Max(260, visual.InteractiveCanvas.Width - anchorDip.X - 12),
+            FontSize = Math.Clamp(workingSizePt * scale, 9.0, 96.0),
+            Foreground = new SolidColorBrush(RgbaToColor(workingColorRgba)),
+            CaretBrush = new SolidColorBrush(Color.FromRgb(20, 20, 20)),
+            Background = new SolidColorBrush(Color.FromArgb(248, 255, 255, 255)),
+            BorderBrush = SelectedObjectStrokeBrush,
+            BorderThickness = new Thickness(1.5),
+            Padding = new Thickness(5, 2, 6, 2),
+            VerticalContentAlignment = VerticalAlignment.Center
+        };
+
+        void SyncEditorAppearance()
+        {
+            sizeLabel.Text = $"{Math.Round(workingSizePt)} pt";
+            editorBox.FontSize = Math.Clamp(workingSizePt * scale, 9.0, 96.0);
+            editorBox.Foreground = new SolidColorBrush(RgbaToColor(workingColorRgba));
+        }
+
+        var miniBar = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+        CreateFormatBarPillButton("A-", "Reducir tamaño", null, 11.5, Color.FromRgb(30, 32, 36), (_, me) =>
+        {
+            me.Handled = true;
+            workingSizePt = Math.Max(6f, workingSizePt - 2f);
+            session.ActiveFontSize = workingSizePt;
+            SyncEditorAppearance();
+            editorBox.Focus();
+        }, out var bMinus);
+        miniBar.Children.Add(bMinus);
+        miniBar.Children.Add(sizeLabel);
+
+        CreateFormatBarPillButton("A+", "Aumentar tamaño", null, 11.5, Color.FromRgb(30, 32, 36), (_, me) =>
+        {
+            me.Handled = true;
+            workingSizePt = Math.Min(144f, workingSizePt + 2f);
+            session.ActiveFontSize = workingSizePt;
+            SyncEditorAppearance();
+            editorBox.Focus();
+        }, out var bPlus);
+        miniBar.Children.Add(bPlus);
+
+        miniBar.Children.Add(new Border
+        {
+            Width = 1,
+            Height = 14,
+            Background = new SolidColorBrush(Color.FromArgb(60, 0, 0, 0)),
+            Margin = new Thickness(4, 0, 4, 0)
+        });
+
+        (uint Rgba, Color Swatch, string Tip)[] palette =
+        [
+            (0x181818FFu, Color.FromRgb(24, 24, 24), "Negro"),
+            (0x1E88E5FFu, Color.FromRgb(30, 136, 229), "Azul"),
+            (0xE53935FFu, Color.FromRgb(229, 57, 53), "Rojo"),
+            (0x43A047FFu, Color.FromRgb(67, 160, 71), "Verde"),
+            (0xFB8C00FFu, Color.FromRgb(251, 140, 0), "Naranja")
+        ];
+
+        foreach (var (rgba, swColor, tip) in palette)
+        {
+            var dot = new Border
+            {
+                Width = 13,
+                Height = 13,
+                CornerRadius = new CornerRadius(6.5),
+                Background = new SolidColorBrush(swColor),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(120, 0, 0, 0)),
+                BorderThickness = new Thickness(1),
+                Margin = new Thickness(2, 0, 2, 0),
+                Cursor = Cursors.Hand,
+                ToolTip = $"Color: {tip}"
+            };
+            dot.MouseLeftButtonDown += (_, me) =>
+            {
+                me.Handled = true;
+                workingColorRgba = rgba;
+                session.ActiveColorRgba = rgba;
+                SyncEditorAppearance();
+                editorBox.Focus();
+            };
+            miniBar.Children.Add(dot);
+        }
+
+        var headerPill = new Border
+        {
+            HorizontalAlignment = HorizontalAlignment.Left,
+            CornerRadius = new CornerRadius(6),
+            Background = new SolidColorBrush(Color.FromRgb(250, 251, 253)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(90, 0, 0, 0)),
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(4, 2, 4, 2),
+            Margin = new Thickness(0, 0, 0, 4),
+            Child = miniBar,
+            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            {
+                BlurRadius = 10,
+                ShadowDepth = 2,
+                Opacity = 0.22,
+                Color = Colors.Black
+            }
+        };
+
+        var wrapper = new StackPanel { Orientation = Orientation.Vertical };
+        wrapper.Children.Add(headerPill);
+        wrapper.Children.Add(editorBox);
+        wrapper.MouseLeftButtonDown += (_, me) => me.Handled = true;
+
+        int pageIdx = visual.PageIndex;
+        double placeX = Math.Clamp(anchorDip.X, 4.0, Math.Max(4.0, visual.InteractiveCanvas.Width - 160.0));
+        double editorTopDip = existingDipRect.HasValue ? existingDipRect.Value.Y : anchorDip.Y;
+        double wrapperTop = Math.Max(2.0, editorTopDip - 30.0);
+
+        Canvas.SetLeft(wrapper, placeX);
+        Canvas.SetTop(wrapper, wrapperTop);
+        Panel.SetZIndex(wrapper, 50);
+
+        _inlineTextOverlay = wrapper;
+        _inlineTextPageIndex = pageIdx;
+
+        _commitInlineTextAction = save =>
+        {
+            if (_inlineTextOverlay is not null)
+            {
+                if (_activePages.TryGetValue(pageIdx, out var v))
+                    v.InteractiveCanvas.Children.Remove(_inlineTextOverlay);
+                else if (_inlineTextOverlay.Parent is Panel pnl)
+                    pnl.Children.Remove(_inlineTextOverlay);
+                _inlineTextOverlay = null;
+                _inlineTextPageIndex = -1;
+            }
+
+            if (!save || Session is null)
+            {
+                RenderAllVisibleHighlights();
+                return;
+            }
+
+            string finalText = (editorBox.Text ?? string.Empty).Trim();
+            if (existingObj is null)
+            {
+                if (!string.IsNullOrWhiteSpace(finalText))
+                {
+                    // Place baseline just below the clicked point so typed text aligns naturally where clicked
+                    double baselineDipY = anchorDip.Y + workingSizePt * scale * 0.82;
+                    var pdfPt = DipPointToPdfPoint(new Point(anchorDip.X, baselineDipY), pageIdx, Session);
+                    int createdIdx = Session.AddTextObject(
+                        finalText,
+                        pdfPt.X,
+                        pdfPt.Y,
+                        fontSize: workingSizePt,
+                        rgba: workingColorRgba,
+                        targetPageIndex: pageIdx);
+                    var createdObj = Session.GetTextObjectsForPage(pageIdx).FirstOrDefault(o => o.Index == createdIdx)
+                        ?? Session.GetTextObjectsForPage(pageIdx).LastOrDefault();
+                    if (createdObj is not null)
+                    {
+                        _selectedTextObject = (pageIdx, createdObj);
+                        RenderAllVisibleHighlights();
+                        SelectionChanged?.Invoke();
+                    }
+                }
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(finalText))
+                {
+                    _selectedTextObject = null;
+                    Session.RemovePageObjectUndoable(pageIdx, existingObj.Index);
+                    SelectionChanged?.Invoke();
+                }
+                else
+                {
+                    string? changedText = !string.Equals(finalText, existingObj.Text, StringComparison.Ordinal) ? finalText : null;
+                    float? changedSize = Math.Abs(workingSizePt - existingObj.FontSize) > 0.1f ? workingSizePt : null;
+                    uint? changedColor = workingColorRgba != existingObj.ColorRgba ? workingColorRgba : null;
+                    if (changedText is not null || changedSize is not null || changedColor is not null)
+                    {
+                        Session.UpdateTextObject(pageIdx, existingObj, changedText, changedSize, changedColor);
+                    }
+                    var refreshed = Session.GetTextObjectsForPage(pageIdx).FirstOrDefault(o => o.Index == existingObj.Index);
+                    _selectedTextObject = refreshed is not null ? (pageIdx, refreshed) : null;
+                    RenderAllVisibleHighlights();
+                    SelectionChanged?.Invoke();
+                }
+            }
+        };
+
+        editorBox.KeyDown += (_, ke) =>
+        {
+            if (ke.Key == Key.Escape)
+            {
+                ke.Handled = true;
+                CommitAndCloseInlineEditor(save: false);
+            }
+            else if (ke.Key == Key.Enter)
+            {
+                ke.Handled = true;
+                CommitAndCloseInlineEditor(save: true);
+            }
+        };
+
+        visual.InteractiveCanvas.Children.Add(wrapper);
+        RenderAllVisibleHighlights();
+        Dispatcher.BeginInvoke(() =>
+        {
+            editorBox.Focus();
+            editorBox.SelectAll();
+        }, System.Windows.Threading.DispatcherPriority.Input);
     }
 
     private Rect ComputeMovedOrResizedObjectRect(Point currentDip, double maxW, double maxH)
