@@ -3,9 +3,9 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Firmar documento digitalmente (PAdES)"
         Width="560"
-        Height="490"
+        Height="535"
         MinWidth="480"
-        MinHeight="430"
+        MinHeight="470"
         WindowStartupLocation="CenterOwner"
         ShowInTaskbar="False">
     <DockPanel Margin="20">
@@ -42,6 +42,22 @@
 
             <TextBlock Text="Servidor de sellado de tiempo (TSA RFC 3161, opcional):" FontSize="12" Margin="0,0,0,4"/>
             <TextBox x:Name="TxtTsaUrl" Padding="8,5" Margin="0,0,0,10"/>
+
+            <DockPanel Margin="0,0,0,10">
+                <Button DockPanel.Dock="Left"
+                        Content="Imagen de rúbrica / sello..."
+                        Style="{StaticResource SecondaryButton}"
+                        Padding="12,4"
+                        FontSize="12"
+                        Click="BtnSelectStampImage_Click"/>
+                <TextBlock x:Name="TxtStampImageStatus"
+                           Text="Sin imagen adicional (solo texto de firma)"
+                           VerticalAlignment="Center"
+                           Margin="10,0,0,0"
+                           FontSize="11.5"
+                           Opacity="0.75"
+                           TextTrimming="CharacterEllipsis"/>
+            </DockPanel>
 
             <CheckBox x:Name="ChkDrawOnPage"
                       Content="Dibujar recuadro de firma en la página con el ratón"

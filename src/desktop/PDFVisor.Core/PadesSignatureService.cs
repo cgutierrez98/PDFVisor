@@ -77,7 +77,8 @@ public static class PadesSignatureService
         string? reason = "Firmado digitalmente con PDFVisor",
         string? location = null,
         string? sourcePassword = null,
-        string? tsaUrl = null)
+        string? tsaUrl = null,
+        (byte[] BgraPixels, int WidthPx, int HeightPx)? stampImage = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePdfPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPdfPath);
@@ -98,7 +99,8 @@ public static class PadesSignatureService
             reason,
             location,
             DefaultReservedBytes,
-            sourcePassword);
+            sourcePassword,
+            stampImage);
 
         // 2. Read prepared file and locate exact <0000...> placeholder bounds (last occurrence for incremental co-signatures)
         byte[] fileBytes = File.ReadAllBytes(destinationPdfPath);

@@ -29,18 +29,32 @@ public sealed class PageItemViewModel : ObservableObject
     }
 }
 
-public sealed class BookmarkItemViewModel
+public sealed class BookmarkItemViewModel : ObservableObject
 {
-    public int Level { get; }
-    public int PageIndex { get; }
-    public string Title { get; }
+    private string _title;
+
+    public int Level { get; set; }
+    public int PageIndex { get; set; }
+    public string Title
+    {
+        get => _title;
+        set
+        {
+            if (SetProperty(ref _title, value))
+            {
+                OnPropertyChanged(nameof(DisplayIndent));
+            }
+        }
+    }
+
+    public ObservableCollection<BookmarkItemViewModel> Children { get; } = [];
     public string DisplayIndent => new string(' ', Math.Clamp(Level, 0, 8) * 3) + Title;
 
     public BookmarkItemViewModel(PdfBookmark bookmark)
     {
         Level = bookmark.Level;
         PageIndex = bookmark.PageIndex;
-        Title = bookmark.Title;
+        _title = bookmark.Title;
     }
 }
 
@@ -49,14 +63,19 @@ public sealed record SearchMatch(int PageIndex, PvRect Rect);
 public enum AnnotationTool
 {
     None,
+    HandPan,
     Highlight,
+    Underline,
+    StrikeOut,
     Square,
     Note,
     Ink,
     AddText,
     Redact,
     SignStamp,
-    AddFormField
+    AddFormField,
+    AddCheckboxField,
+    CropPage
 }
 
 public sealed class DocumentSession : ObservableObject, IDisposable
@@ -77,6 +96,9 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     private bool _searchWholeWord;
     private List<SearchMatch> _searchMatches = [];
     private int _activeMatchIndex = -1;
+    private readonly Stack<int> _backStack = new();
+    private readonly Stack<int> _forwardStack = new();
+    private bool _isNavigatingHistory;
 
     /// <summary>
     /// Limits concurrent background PDFium renders (tiles + thumbnails) to prevent ThreadPool starvation over g_pdfium_mutex.
@@ -89,10 +111,16 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     public int PageCount => _document.PageCount;
     public ObservableCollection<PageItemViewModel> Pages { get; } = [];
     public ObservableCollection<BookmarkItemViewModel> Bookmarks { get; } = [];
+    public ObservableCollection<BookmarkItemViewModel> BookmarkTree { get; } = [];
+    public ObservableCollection<PdfAnnotationInfo> Annotations { get; } = [];
+    public ObservableCollection<PdfAttachmentInfo> Attachments { get; } = [];
     public ObservableCollection<PdfFormField> FormFields { get; } = [];
     public ObservableCollection<PdfSignatureVerificationResult> Signatures { get; } = [];
     public ObservableCollection<PdfPageObjectInfo> CurrentPageObjects { get; } = [];
     public CommandHistory History { get; } = new();
+
+    public bool CanNavigateBack => _backStack.Count > 0;
+    public bool CanNavigateForward => _forwardStack.Count > 0;
 
     public bool IsModified
     {
@@ -273,13 +301,109 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         _document = document;
         RebuildPageList();
-        foreach (var bm in document.GetBookmarks())
-        {
-            Bookmarks.Add(new BookmarkItemViewModel(bm));
-        }
+        RebuildBookmarksFromDocument();
+        RefreshAnnotationsAndAttachments();
         RefreshFormFieldsAndSignatures();
         RefreshCurrentPageObjects();
     }
+
+    public void JumpToPageWithHistory(int targetPageIndex)
+    {
+        if (PageCount == 0) return;
+        int clamped = Math.Clamp(targetPageIndex, 0, PageCount - 1);
+        if (clamped == CurrentPageIndex) return;
+
+        if (!_isNavigatingHistory)
+        {
+            _backStack.Push(CurrentPageIndex);
+            _forwardStack.Clear();
+            OnPropertyChanged(nameof(CanNavigateBack));
+            OnPropertyChanged(nameof(CanNavigateForward));
+        }
+        CurrentPageIndex = clamped;
+    }
+
+    public void NavigateBack()
+    {
+        if (_backStack.Count == 0) return;
+        _isNavigatingHistory = true;
+        try
+        {
+            _forwardStack.Push(CurrentPageIndex);
+            CurrentPageIndex = _backStack.Pop();
+            OnPropertyChanged(nameof(CanNavigateBack));
+            OnPropertyChanged(nameof(CanNavigateForward));
+        }
+        finally { _isNavigatingHistory = false; }
+    }
+
+    public void NavigateForward()
+    {
+        if (_forwardStack.Count == 0) return;
+        _isNavigatingHistory = true;
+        try
+        {
+            _backStack.Push(CurrentPageIndex);
+            CurrentPageIndex = _forwardStack.Pop();
+            OnPropertyChanged(nameof(CanNavigateBack));
+            OnPropertyChanged(nameof(CanNavigateForward));
+        }
+        finally { _isNavigatingHistory = false; }
+    }
+
+    public void RebuildBookmarksFromDocument()
+    {
+        Bookmarks.Clear();
+        BookmarkTree.Clear();
+        var stack = new Stack<BookmarkItemViewModel>();
+
+        foreach (var bm in _document.GetBookmarks())
+        {
+            var vm = new BookmarkItemViewModel(bm);
+            Bookmarks.Add(vm);
+
+            while (stack.Count > 0 && stack.Peek().Level >= vm.Level)
+            {
+                stack.Pop();
+            }
+
+            if (stack.Count == 0)
+                BookmarkTree.Add(vm);
+            else
+                stack.Peek().Children.Add(vm);
+
+            stack.Push(vm);
+        }
+    }
+
+    public void RefreshAnnotationsAndAttachments()
+    {
+        Annotations.Clear();
+        for (int p = 0; p < PageCount; p++)
+        {
+            foreach (var a in _document.GetPageAnnotations(p))
+            {
+                if (a.Subtype is not PdfAnnotSubtype.Widget and not PdfAnnotSubtype.Popup and not PdfAnnotSubtype.Link)
+                {
+                    Annotations.Add(a);
+                }
+            }
+        }
+
+        Attachments.Clear();
+        foreach (var att in _document.GetAttachments())
+        {
+            Attachments.Add(att);
+        }
+    }
+
+    public IReadOnlyList<PdfAnnotationInfo> GetInteractiveAnnotationsForPage(int pageIndex) =>
+        Annotations.Where(a => a.PageIndex == pageIndex).ToArray();
+
+    public IReadOnlyList<PdfPageObjectInfo> GetImageObjectsForPage(int pageIndex) =>
+        pageIndex == CurrentPageIndex
+            ? CurrentPageObjects.Where(o => o.Type == PdfPageObjectType.Image).ToArray()
+            : _document.GetPageObjects(pageIndex).Where(o => o.Type == PdfPageObjectType.Image).ToArray();
 
     public void RefreshCurrentPageObjects()
     {
@@ -303,6 +427,142 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         if (PageCount == 0) return;
         History.Execute(new MovePageObjectCommand(_document, CurrentPageIndex, objIndex, dxPt, dyPt));
         OnDocumentMutated(CurrentPageIndex);
+    }
+
+    public void ResizeOrMoveImageObject(int pageIndex, int objIndex, PvRect oldBounds, PvRect newBounds)
+    {
+        if (PageCount == 0) return;
+        History.Execute(new ResizeImageObjectCommand(_document, pageIndex, objIndex, oldBounds, newBounds));
+        OnDocumentMutated(pageIndex);
+    }
+
+    public void RemovePageObjectUndoable(int pageIndex, int objIndex)
+    {
+        if (PageCount == 0) return;
+        History.Execute(new SnapshotInMemoryMutationCommand(
+            _document,
+            $"Eliminar objeto #{objIndex} en página {pageIndex + 1}",
+            doc => doc.RemovePageObject(pageIndex, objIndex)));
+        OnDocumentMutated(pageIndex);
+    }
+
+    public void InsertBlankPageAtCurrent(double? widthPt = null, double? heightPt = null)
+    {
+        double w = widthPt ?? (PageCount > 0 ? Pages[CurrentPageIndex].WidthPt : 595.0);
+        double h = heightPt ?? (PageCount > 0 ? Pages[CurrentPageIndex].HeightPt : 842.0);
+        int targetIdx = PageCount > 0 ? CurrentPageIndex + 1 : 0;
+        History.Execute(new InsertBlankPageCommand(_document, targetIdx, w, h));
+        OnDocumentMutated(targetIdx);
+    }
+
+    public void CropPage(int pageIndex, PvRect cropBox)
+    {
+        if (PageCount == 0 || pageIndex < 0 || pageIndex >= PageCount) return;
+        History.Execute(new CropPageCommand(_document, pageIndex, cropBox));
+        OnDocumentMutated(pageIndex);
+    }
+
+    public void FlattenDocument()
+    {
+        if (PageCount == 0) return;
+        int cur = CurrentPageIndex;
+        History.Execute(new SnapshotInMemoryMutationCommand(
+            _document,
+            "Aplanar formularios y anotaciones",
+            doc => doc.FlattenAll()));
+        RefreshFormFieldsAndSignatures();
+        OnDocumentMutated(cur);
+    }
+
+    public void AddTextMarkup(int pageIndex, PdfAnnotSubtype subtype, IReadOnlyList<PvRect> quads, uint rgba)
+    {
+        if (PageCount == 0 || quads.Count == 0) return;
+        History.Execute(new AddTextMarkupCommand(_document, pageIndex, subtype, quads, rgba));
+        OnDocumentMutated(pageIndex);
+    }
+
+    public void UpdateExistingAnnotation(PdfAnnotationInfo existing, PvRect? newRect = null, string? newContents = null, uint? newColor = null)
+    {
+        if (PageCount == 0) return;
+        History.Execute(new UpdateAnnotationCommand(_document, existing, newRect, newContents, newColor));
+        OnDocumentMutated(existing.PageIndex);
+    }
+
+    public void DeleteExistingAnnotation(PdfAnnotationInfo existing)
+    {
+        if (PageCount == 0) return;
+        int p = existing.PageIndex;
+        int idx = existing.Index;
+        History.Execute(new SnapshotInMemoryMutationCommand(
+            _document,
+            $"Eliminar {existing.TypeDisplay} en página {p + 1}",
+            doc => doc.RemoveAnnotation(p, idx)));
+        OnDocumentMutated(p);
+    }
+
+    public void AddAttachmentFromFile(string filePath)
+    {
+        string name = Path.GetFileName(filePath);
+        byte[] bytes = File.ReadAllBytes(filePath);
+        int cur = CurrentPageIndex;
+        History.Execute(new SnapshotInMemoryMutationCommand(
+            _document,
+            $"Adjuntar \"{name}\"",
+            doc => doc.AddAttachment(name, bytes)));
+        OnDocumentMutated(cur);
+    }
+
+    public void ExtractAttachmentToFile(int index, string destinationPath)
+    {
+        _document.ExtractAttachment(index, destinationPath);
+    }
+
+    public void DeleteAttachmentAt(int index, string name)
+    {
+        int cur = CurrentPageIndex;
+        History.Execute(new SnapshotInMemoryMutationCommand(
+            _document,
+            $"Eliminar adjunto \"{name}\"",
+            doc => doc.DeleteAttachment(index)));
+        OnDocumentMutated(cur);
+    }
+
+    public void AddBookmark(string title, int pageIndex, int level = 0)
+    {
+        var updated = Bookmarks.Select(b => new PdfBookmark(b.Level, b.PageIndex, b.Title)).ToList();
+        updated.Add(new PdfBookmark(Math.Max(0, level), Math.Clamp(pageIndex, 0, Math.Max(0, PageCount - 1)), title));
+        ApplyBookmarksList(updated, $"Añadir marcador \"{title}\"");
+    }
+
+    public void RenameBookmark(BookmarkItemViewModel item, string newTitle)
+    {
+        int idx = Bookmarks.IndexOf(item);
+        if (idx < 0) return;
+        var updated = Bookmarks.Select((b, i) =>
+            new PdfBookmark(b.Level, b.PageIndex, i == idx ? newTitle : b.Title)).ToList();
+        ApplyBookmarksList(updated, $"Renombrar marcador a \"{newTitle}\"");
+    }
+
+    public void DeleteBookmark(BookmarkItemViewModel item)
+    {
+        int idx = Bookmarks.IndexOf(item);
+        if (idx < 0) return;
+        var updated = Bookmarks
+            .Where((_, i) => i != idx)
+            .Select(b => new PdfBookmark(b.Level, b.PageIndex, b.Title))
+            .ToList();
+        ApplyBookmarksList(updated, $"Eliminar marcador \"{item.Title}\"");
+    }
+
+    private void ApplyBookmarksList(IReadOnlyList<PdfBookmark> updated, string description)
+    {
+        int cur = CurrentPageIndex;
+        History.Execute(new SnapshotPdfMutationCommand(
+            _document,
+            description,
+            (src, dst, pwd) => QpdfTools.SetBookmarks(src, dst, updated, sourcePassword: pwd)));
+        RebuildBookmarksFromDocument();
+        OnExternalWorkingCopyMutated(cur);
     }
 
     public void AddTextObject(string text, double xPt, double yPt, string fontName = "Helvetica", float fontSize = 14f, uint rgba = 0x111111FF)
@@ -380,7 +640,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         try
         {
             _document.SaveAs(tempSrc, incremental: false);
-            QpdfTools.SanitizeMetadata(tempSrc, destinationPath, sourcePassword: null);
+            QpdfTools.SanitizeMetadata(tempSrc, destinationPath, sourcePassword: _document.ActivePassword);
         }
         finally
         {
@@ -436,7 +696,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         History.Execute(new SnapshotPdfMutationCommand(
             _document,
             $"Añadir campo \"{fieldName}\"",
-            (src, dst) => QpdfTools.AddTextField(src, dst, pageIdx, fieldName, pdfRect, defaultValue, sourcePassword: null)));
+            (src, dst, pwd) => QpdfTools.AddTextField(src, dst, pageIdx, fieldName, pdfRect, defaultValue, sourcePassword: pwd)));
         OnExternalWorkingCopyMutated(pageIdx);
     }
 
@@ -447,7 +707,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         History.Execute(new SnapshotPdfMutationCommand(
             _document,
             $"Mover/redimensionar campo \"{fieldName}\"",
-            (src, dst) => QpdfTools.SetFormFieldRect(src, dst, fieldName, newPdfRect, sourcePassword: null)));
+            (src, dst, pwd) => QpdfTools.SetFormFieldRect(src, dst, fieldName, newPdfRect, sourcePassword: pwd)));
         OnExternalWorkingCopyMutated(pageIdx);
     }
 
@@ -458,7 +718,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         History.Execute(new SnapshotPdfMutationCommand(
             _document,
             $"Eliminar campo \"{fieldName}\"",
-            (src, dst) => QpdfTools.RemoveFormField(src, dst, fieldName, sourcePassword: null)));
+            (src, dst, pwd) => QpdfTools.RemoveFormField(src, dst, fieldName, sourcePassword: pwd)));
         OnExternalWorkingCopyMutated(pageIdx);
     }
 
@@ -468,8 +728,33 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         History.Execute(new SnapshotPdfMutationCommand(
             _document,
             $"Rellenar campo \"{fieldName}\"",
-            (src, dst) => QpdfTools.SetFormFieldValue(src, dst, fieldName, newValue, sourcePassword: null)));
+            (src, dst, pwd) => QpdfTools.SetFormFieldValue(src, dst, fieldName, newValue, sourcePassword: pwd)));
         OnExternalWorkingCopyMutated(pageIdx);
+    }
+
+    public void AddCheckboxFormField(string fieldName, PvRect pdfRect, bool initiallyChecked = false, int? targetPageIndex = null)
+    {
+        if (PageCount == 0) return;
+        int pageIdx = targetPageIndex is int p ? Math.Clamp(p, 0, PageCount - 1) : CurrentPageIndex;
+        History.Execute(new SnapshotPdfMutationCommand(
+            _document,
+            $"Añadir casilla \"{fieldName}\"",
+            (src, dst, pwd) => QpdfTools.AddCheckboxField(src, dst, pageIdx, fieldName, pdfRect, initiallyChecked, sourcePassword: pwd)));
+        OnExternalWorkingCopyMutated(pageIdx);
+    }
+
+    public void DecryptAndExport(string destinationPath)
+    {
+        string tempSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_dec_src_{Guid.NewGuid():N}.pdf");
+        try
+        {
+            _document.SaveAs(tempSrc, incremental: false);
+            QpdfTools.Decrypt(tempSrc, destinationPath, sourcePassword: _document.ActivePassword);
+        }
+        finally
+        {
+            if (File.Exists(tempSrc)) try { File.Delete(tempSrc); } catch { }
+        }
     }
 
     public void SignPadesAndExport(
@@ -478,9 +763,10 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         string? reason = "Firmado digitalmente con PDFVisor",
         string? location = null,
         string? tsaUrl = null,
-        PvRect? customWidgetRect = null)
+        PvRect? customWidgetRect = null,
+        (byte[] BgraPixels, int WidthPx, int HeightPx)? stampImage = null)
     {
-        bool hasPriorSignatures = Signatures.Count > 0 && !IsModified && File.Exists(_document.ActiveSourcePath);
+        bool hasPriorSignatures = Signatures.Count > 0 && !IsModified && stampImage is null && File.Exists(_document.ActiveSourcePath);
         string? tempSrc = null;
         try
         {
@@ -501,7 +787,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
             int offsetIdx = Signatures.Count % 3;
             double left = 36 + offsetIdx * 182;
             var sigRect = customWidgetRect ?? new PvRect { Left = left, Bottom = 36, Right = left + 174, Top = 86 };
-            string? srcPwd = hasPriorSignatures ? _document.ActivePassword : null;
+            string? srcPwd = _document.ActivePassword;
 
             PadesSignatureService.SignPdfPades(
                 sourceForSigning,
@@ -512,7 +798,8 @@ public sealed class DocumentSession : ObservableObject, IDisposable
                 reason,
                 location,
                 sourcePassword: srcPwd,
-                tsaUrl: tsaUrl);
+                tsaUrl: tsaUrl,
+                stampImage: stampImage);
         }
         finally
         {
@@ -524,7 +811,9 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         IsModified = true;
         RebuildPageList();
+        RebuildBookmarksFromDocument();
         _currentPageIndex = Math.Clamp(pageIdx, 0, Math.Max(0, PageCount - 1));
+        RefreshAnnotationsAndAttachments();
         RefreshFormFieldsAndSignatures();
         RefreshCurrentPageObjects();
         DocumentRevision++;
@@ -695,7 +984,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         History.Execute(new SnapshotPdfMutationCommand(
             _document,
             "Editar metadatos",
-            (src, dst) => QpdfTools.SetMetadata(src, dst, title, author, subject, keywords, sourcePassword: null)));
+            (src, dst, pwd) => QpdfTools.SetMetadata(src, dst, title, author, subject, keywords, sourcePassword: pwd)));
         OnExternalWorkingCopyMutated(pageIdx);
     }
 
@@ -707,7 +996,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
             History.Execute(new SnapshotPdfMutationCommand(
                 _document,
                 "Editar metadatos",
-                (src, dst) => QpdfTools.SetMetadata(src, dst, title, author, subject, keywords, sourcePassword: null)));
+                (src, dst, pwd) => QpdfTools.SetMetadata(src, dst, title, author, subject, keywords, sourcePassword: pwd)));
         });
         OnExternalWorkingCopyMutated(pageIdx);
     }
@@ -767,7 +1056,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         try
         {
             _document.SaveAs(tempSrc, incremental: false);
-            QpdfTools.Optimize(tempSrc, destinationPath, linearize, recompress, objectStreams);
+            QpdfTools.Optimize(tempSrc, destinationPath, linearize, recompress, objectStreams, sourcePassword: _document.ActivePassword);
         }
         finally
         {
@@ -781,7 +1070,7 @@ public sealed class DocumentSession : ObservableObject, IDisposable
         try
         {
             _document.SaveAs(tempSrc, incremental: false);
-            QpdfTools.EncryptAes256(tempSrc, destinationPath, userPassword, ownerPassword, allowPrint, allowModify, allowExtract);
+            QpdfTools.EncryptAes256(tempSrc, destinationPath, userPassword, ownerPassword, allowPrint, allowModify, allowExtract, sourcePassword: _document.ActivePassword);
         }
         finally
         {
@@ -830,7 +1119,9 @@ public sealed class DocumentSession : ObservableObject, IDisposable
     {
         IsModified = true;
         RebuildPageList();
+        RebuildBookmarksFromDocument();
         _currentPageIndex = Math.Clamp(newCurrentPage, 0, Math.Max(0, PageCount - 1));
+        RefreshAnnotationsAndAttachments();
         RefreshCurrentPageObjects();
         _searchMatches = [];
         _activeMatchIndex = -1;

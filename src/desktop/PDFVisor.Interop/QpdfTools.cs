@@ -169,6 +169,91 @@ public static class QpdfTools
         PdfEngine.ThrowIfFailed(status);
     }
 
+    public static void AddCheckboxField(
+        string sourcePath,
+        string destinationPath,
+        int pageIndex,
+        string fieldName,
+        PvRect rect,
+        bool initiallyChecked = false,
+        string? sourcePassword = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fieldName);
+
+        var status = NativeMethods.pv_qpdf_add_checkbox_field(
+            sourcePath,
+            sourcePassword,
+            destinationPath,
+            pageIndex,
+            fieldName,
+            ref rect,
+            initiallyChecked ? 1 : 0);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
+    public static void Decrypt(
+        string sourcePath,
+        string destinationPath,
+        string? sourcePassword = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+
+        var status = NativeMethods.pv_qpdf_decrypt(sourcePath, sourcePassword, destinationPath);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
+    public static void SetBookmarks(
+        string sourcePath,
+        string destinationPath,
+        IReadOnlyList<PdfBookmark> bookmarks,
+        string? sourcePassword = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        ArgumentNullException.ThrowIfNull(bookmarks);
+
+        var ptrs = new List<nint>(bookmarks.Count);
+        var nativeArr = new PvBookmarkNative[bookmarks.Count];
+        try
+        {
+            for (int i = 0; i < bookmarks.Count; i++)
+            {
+                nint strPtr = Marshal.StringToCoTaskMemUTF8(bookmarks[i].Title ?? "Marcador");
+                ptrs.Add(strPtr);
+                nativeArr[i] = new PvBookmarkNative
+                {
+                    Level = bookmarks[i].Level,
+                    PageIndex = bookmarks[i].PageIndex,
+                    TitleUtf8 = strPtr
+                };
+            }
+
+            unsafe
+            {
+                fixed (PvBookmarkNative* pArr = nativeArr)
+                {
+                    var status = NativeMethods.pv_qpdf_set_bookmarks(
+                        sourcePath,
+                        sourcePassword,
+                        destinationPath,
+                        pArr,
+                        nativeArr.Length);
+                    PdfEngine.ThrowIfFailed(status);
+                }
+            }
+        }
+        finally
+        {
+            foreach (var p in ptrs)
+            {
+                if (p != nint.Zero) Marshal.FreeCoTaskMem(p);
+            }
+        }
+    }
+
     public static void PreparePadesSignature(
         string sourcePath,
         string destinationPath,
@@ -178,10 +263,36 @@ public static class QpdfTools
         string? reason = null,
         string? location = null,
         int reservedBytes = 12288,
-        string? sourcePassword = null)
+        string? sourcePassword = null,
+        (byte[] BgraPixels, int WidthPx, int HeightPx)? stampImage = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourcePath);
         ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+
+        if (stampImage is { } img && img.BgraPixels.Length >= img.WidthPx * img.HeightPx * 4 && img.WidthPx > 0 && img.HeightPx > 0)
+        {
+            unsafe
+            {
+                fixed (byte* pImg = img.BgraPixels)
+                {
+                    var st = NativeMethods.pv_qpdf_prepare_pades_signature_ex(
+                        sourcePath,
+                        sourcePassword,
+                        destinationPath,
+                        pageIndex,
+                        ref rect,
+                        signerLabel,
+                        reason,
+                        location,
+                        reservedBytes,
+                        pImg,
+                        img.WidthPx,
+                        img.HeightPx);
+                    PdfEngine.ThrowIfFailed(st);
+                    return;
+                }
+            }
+        }
 
         var status = NativeMethods.pv_qpdf_prepare_pades_signature(
             sourcePath,

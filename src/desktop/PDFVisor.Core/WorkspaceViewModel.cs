@@ -49,6 +49,13 @@ public sealed class WorkspaceViewModel : ObservableObject, IDisposable
         }
     }
 
+    public void ReorderSession(int fromIndex, int toIndex)
+    {
+        if (fromIndex < 0 || fromIndex >= OpenSessions.Count || toIndex < 0 || toIndex >= OpenSessions.Count || fromIndex == toIndex)
+            return;
+        OpenSessions.Move(fromIndex, toIndex);
+    }
+
     public void Dispose()
     {
         foreach (var session in OpenSessions)

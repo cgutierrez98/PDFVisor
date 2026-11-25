@@ -753,6 +753,148 @@ public sealed class EngineSmokeTests : IDisposable
         Assert.Single(dupDiff, d => d.Kind == DiffLineKind.Added);
     }
 
+    [Fact]
+    public void V14_BlankPage_Crop_Flatten_Markup_Checkbox_Bookmarks_Attachments_Decrypt_And_StampPades()
+    {
+        string basePdf = CreateTempPdf("Underline and StrikeOut Target Line");
+        string encPdf = Path.Combine(Path.GetTempPath(), $"pdfvisor_v14_enc_{Guid.NewGuid():N}.pdf");
+        string decPdf = Path.Combine(Path.GetTempPath(), $"pdfvisor_v14_dec_{Guid.NewGuid():N}.pdf");
+        string stampSigPdf = Path.Combine(Path.GetTempPath(), $"pdfvisor_v14_stampsig_{Guid.NewGuid():N}.pdf");
+        string attachSrc = Path.Combine(Path.GetTempPath(), $"pdfvisor_v14_anexo_{Guid.NewGuid():N}.txt");
+        string attachOut = Path.Combine(Path.GetTempPath(), $"pdfvisor_v14_anexo_out_{Guid.NewGuid():N}.txt");
+        _tempFiles.AddRange([encPdf, decPdf, stampSigPdf, attachSrc, attachOut]);
+
+        File.WriteAllText(attachSrc, "Contenido confidencial adjunto en PDF 2026", Encoding.UTF8);
+
+        using (var session = new DocumentSession(PdfDocument.Open(basePdf)))
+        {
+            // 1. Insert Blank Page + Undo/Redo + Navigation History (Back / Forward)
+            session.InsertBlankPageAtCurrent(400, 600);
+            Assert.Equal(2, session.PageCount);
+            Assert.InRange(session.Pages[1].WidthPt, 399, 401);
+            session.Undo();
+            Assert.Equal(1, session.PageCount);
+            session.Redo();
+            Assert.Equal(2, session.PageCount);
+
+            session.CurrentPageIndex = 0;
+            session.JumpToPageWithHistory(1);
+            Assert.Equal(1, session.CurrentPageIndex);
+            Assert.True(session.CanNavigateBack);
+            session.NavigateBack();
+            Assert.Equal(0, session.CurrentPageIndex);
+            Assert.True(session.CanNavigateForward);
+            session.NavigateForward();
+            Assert.Equal(1, session.CurrentPageIndex);
+            session.CurrentPageIndex = 0;
+
+            // 2. Visual CropBox + Undo/Redo
+            session.CropPage(0, new PvRect { Left = 50, Bottom = 100, Right = 500, Top = 780 });
+            Assert.InRange(session.Pages[0].WidthPt, 449, 451);
+            session.Undo();
+            Assert.InRange(session.Pages[0].WidthPt, 594, 596);
+
+            // 3. Text-snapped QuadPoints Markup (Highlight, Underline, StrikeOut) + Sticky Note Edit/Move/Delete
+            var wordQuads = session.Document.GetTextRangeRects(0, 0, 9);
+            Assert.NotEmpty(wordQuads);
+            session.AddTextMarkup(0, PdfAnnotSubtype.Highlight, wordQuads, 0xFFEA0080);
+            session.AddTextMarkup(0, PdfAnnotSubtype.Underline, wordQuads, 0x1E88E5FF);
+            session.AddTextMarkup(0, PdfAnnotSubtype.StrikeOut, wordQuads, 0xE53935FF);
+            session.AddNote(new PvRect { Left = 300, Bottom = 600, Right = 324, Top = 624 }, "Nota inicial");
+            Assert.Equal(4, session.Annotations.Count);
+
+            var noteAnnot = Assert.Single(session.Annotations, a => a.Subtype == PdfAnnotSubtype.Text);
+            Assert.Equal("Nota inicial", noteAnnot.Contents);
+            session.UpdateExistingAnnotation(noteAnnot, new PvRect { Left = 340, Bottom = 610, Right = 364, Top = 634 }, "Nota editada");
+            var updatedNote = Assert.Single(session.Annotations, a => a.Subtype == PdfAnnotSubtype.Text);
+            Assert.Equal("Nota editada", updatedNote.Contents);
+            Assert.InRange(updatedNote.Rect.Left, 339, 341);
+            session.Undo();
+            Assert.Equal("Nota inicial", Assert.Single(session.Annotations, a => a.Subtype == PdfAnnotSubtype.Text).Contents);
+
+            // 4. Interactive Image Resize + Undo/Redo
+            byte[] img = new byte[12 * 12 * 4];
+            for (int i = 0; i < img.Length; i += 4) { img[i] = 40; img[i + 1] = 160; img[i + 2] = 220; img[i + 3] = 255; }
+            session.AddImageBgra(img, 12, 12, new PvRect { Left = 80, Bottom = 300, Right = 180, Top = 400 });
+            var imgObj = Assert.Single(session.GetImageObjectsForPage(0));
+            session.ResizeOrMoveImageObject(0, imgObj.Index, imgObj.Bounds, new PvRect { Left = 90, Bottom = 310, Right = 290, Top = 460 });
+            var resizedImg = Assert.Single(session.GetImageObjectsForPage(0));
+            Assert.InRange(resizedImg.Bounds.Right - resizedImg.Bounds.Left, 199, 201);
+            session.Undo();
+            Assert.InRange(Assert.Single(session.GetImageObjectsForPage(0)).Bounds.Right - 80, 99, 101);
+
+            // 5. Embedded File Attachments (Add, List, Extract, Delete + Undo)
+            session.AddAttachmentFromFile(attachSrc);
+            var att = Assert.Single(session.Attachments);
+            Assert.Contains("anexo", att.Name);
+            session.ExtractAttachmentToFile(att.Index, attachOut);
+            Assert.Equal("Contenido confidencial adjunto en PDF 2026", File.ReadAllText(attachOut, Encoding.UTF8));
+            session.DeleteAttachmentAt(att.Index, att.Name);
+            Assert.Empty(session.Attachments);
+            session.Undo();
+            Assert.Single(session.Attachments);
+
+            // 6. Checkbox AcroForm field + Toggle + Hierarchical Bookmarks (Add, Rename, Delete)
+            session.AddCheckboxFormField("AceptoTerminos", new PvRect { Left = 72, Bottom = 520, Right = 90, Top = 538 }, initiallyChecked: false, targetPageIndex: 0);
+            var cb = Assert.Single(session.FormFields, f => f.Name == "AceptoTerminos");
+            Assert.Equal("/Btn", cb.FieldType);
+            Assert.False(cb.IsChecked);
+            session.SetFormFieldValue("AceptoTerminos", "Yes");
+            Assert.True(Assert.Single(session.FormFields, f => f.Name == "AceptoTerminos").IsChecked);
+
+            session.AddBookmark("Capítulo 1", 0, level: 0);
+            session.AddBookmark("Sección 1.1", 1, level: 1);
+            Assert.Equal(2, session.Bookmarks.Count);
+            Assert.Single(session.BookmarkTree);
+            Assert.Single(session.BookmarkTree[0].Children);
+            session.RenameBookmark(session.Bookmarks[0], "Capítulo 1 (Revisado)");
+            Assert.Equal("Capítulo 1 (Revisado)", session.Bookmarks[0].Title);
+
+            // 7. Flatten PDF (bakes annotations & form widgets permanently into page content, Undoable!)
+            session.FlattenDocument();
+            Assert.Empty(session.Annotations);
+            session.Undo();
+            Assert.NotEmpty(session.Annotations);
+
+            // 8. Granular AES-256 Encryption -> Decrypt -> Verify decrypted opens without password
+            session.EncryptAes256AndExport(encPdf, "ClaveUsuario", "ClavePropietario", allowPrint: true, allowModify: false, allowExtract: true);
+        }
+
+        using (var encSession = new DocumentSession(PdfDocument.Open(encPdf, "ClaveUsuario")))
+        {
+            encSession.DecryptAndExport(decPdf);
+        }
+        using (var decDoc = PdfDocument.Open(decPdf))
+        {
+            Assert.Equal(2, decDoc.PageCount);
+        }
+
+        // 9. PAdES Signature with custom handwritten/stamp image XObject embedded + Localization check
+        using var rsa = RSA.Create(2048);
+        var req = new CertificateRequest("CN=Firmante Rúbrica Visual", rsa, HashAlgorithmName.SHA256, RSASignaturePadding.Pkcs1);
+        using var cert = req.CreateSelfSigned(DateTimeOffset.UtcNow.AddMinutes(-5), DateTimeOffset.UtcNow.AddDays(1));
+
+        byte[] stampBgra = new byte[24 * 12 * 4];
+        for (int i = 0; i < stampBgra.Length; i += 4) { stampBgra[i] = 180; stampBgra[i + 1] = 40; stampBgra[i + 2] = 20; stampBgra[i + 3] = 255; }
+
+        using (var sigSession = new DocumentSession(PdfDocument.Open(decPdf)))
+        {
+            sigSession.SignPadesAndExport(stampSigPdf, cert, reason: "Firma con rúbrica", location: "Valencia", stampImage: (stampBgra, 24, 12));
+        }
+
+        using (var verifyDoc = PdfDocument.Open(stampSigPdf))
+        {
+            var v = Assert.Single(PadesSignatureService.VerifySignatures(verifyDoc));
+            Assert.True(v.IsCryptographicallyValid, v.StatusSummary);
+            Assert.Equal("Firmante Rúbrica Visual", v.SignerName);
+        }
+
+        LocalizationService.CurrentLanguage = "en";
+        Assert.Equal("_File", LocalizationService.Get("Menu.File"));
+        LocalizationService.CurrentLanguage = "es";
+        Assert.Equal("_Archivo", LocalizationService.Get("Menu.File"));
+    }
+
     private static byte[] BuildMinimalValidPdf(string text)
     {
         var sb = new StringBuilder();

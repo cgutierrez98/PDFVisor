@@ -917,6 +917,228 @@ PV_API pv_status_t pv_qpdf_remove_form_field(
     }
 }
 
+PV_API pv_status_t pv_qpdf_add_checkbox_field(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    int32_t page_index,
+    const char* field_name_utf8,
+    const pv_rect_t* rect,
+    int32_t initially_checked) {
+    if (!src_utf8_path || !dest_utf8_path || !field_name_utf8 || !rect || page_index < 0) {
+        pv_internal::set_last_error("Invalid arguments to pv_qpdf_add_checkbox_field");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    try {
+        QPDF pdf;
+        pdf.processFile(src_utf8_path, src_utf8_password ? src_utf8_password : "");
+        QPDFPageDocumentHelper pdh(pdf);
+        auto pages = pdh.getAllPages();
+        if (static_cast<size_t>(page_index) >= pages.size()) {
+            pv_internal::set_last_error("Page index out of range");
+            return PV_ERR_INVALID_PAGE;
+        }
+        auto page_obj = pages[static_cast<size_t>(page_index)].getObjectHandle();
+
+        auto root = pdf.getRoot();
+        QPDFObjectHandle acroform = root.getKey("/AcroForm");
+        if (acroform.isNull()) {
+            acroform = pdf.makeIndirectObject(QPDFObjectHandle::newDictionary());
+            acroform.replaceKey("/Fields", QPDFObjectHandle::newArray());
+            root.replaceKey("/AcroForm", acroform);
+        }
+        auto fields_arr = acroform.getKey("/Fields");
+        if (!fields_arr.isArray()) {
+            fields_arr = QPDFObjectHandle::newArray();
+            acroform.replaceKey("/Fields", fields_arr);
+        }
+
+        double left = std::min(rect->left, rect->right);
+        double right = std::max(rect->left, rect->right);
+        double bottom = std::min(rect->bottom, rect->top);
+        double top = std::max(rect->bottom, rect->top);
+        double w = std::max(10.0, right - left);
+        double h = std::max(10.0, top - bottom);
+
+        // Build crisp vector /Off and /Yes Form XObject appearances for universal viewer compatibility
+        std::ostringstream off_s;
+        off_s << "q 0.96 0.97 1.0 rg 0 0 " << w << " " << h << " re f "
+              << "0.2 0.4 0.7 RG 1 w 0.5 0.5 " << (w - 1.0) << " " << (h - 1.0) << " re S Q";
+        auto off_xobj = QPDFObjectHandle::newStream(&pdf, off_s.str());
+        off_xobj.getDict().replaceKey("/Type", QPDFObjectHandle::newName("/XObject"));
+        off_xobj.getDict().replaceKey("/Subtype", QPDFObjectHandle::newName("/Form"));
+        off_xobj.getDict().replaceKey("/BBox", QPDFObjectHandle::parse("[0 0 " + std::to_string(w) + " " + std::to_string(h) + "]"));
+
+        std::ostringstream yes_s;
+        yes_s << "q 0.90 0.95 1.0 rg 0 0 " << w << " " << h << " re f "
+              << "0.15 0.38 0.75 RG 1.2 w 0.5 0.5 " << (w - 1.0) << " " << (h - 1.0) << " re S "
+              << "0.1 0.32 0.70 RG " << std::max(1.5, w * 0.12) << " w 1 J 1 j "
+              << (w * 0.22) << " " << (h * 0.50) << " m "
+              << (w * 0.42) << " " << (h * 0.26) << " l "
+              << (w * 0.78) << " " << (h * 0.74) << " l S Q";
+        auto yes_xobj = QPDFObjectHandle::newStream(&pdf, yes_s.str());
+        yes_xobj.getDict().replaceKey("/Type", QPDFObjectHandle::newName("/XObject"));
+        yes_xobj.getDict().replaceKey("/Subtype", QPDFObjectHandle::newName("/Form"));
+        yes_xobj.getDict().replaceKey("/BBox", QPDFObjectHandle::parse("[0 0 " + std::to_string(w) + " " + std::to_string(h) + "]"));
+
+        auto ap_n = QPDFObjectHandle::newDictionary();
+        ap_n.replaceKey("/Off", off_xobj);
+        ap_n.replaceKey("/Yes", yes_xobj);
+        auto ap = QPDFObjectHandle::newDictionary();
+        ap.replaceKey("/N", ap_n);
+
+        const char* state = initially_checked ? "/Yes" : "/Off";
+        auto field = pdf.makeIndirectObject(QPDFObjectHandle::newDictionary());
+        field.replaceKey("/Type", QPDFObjectHandle::newName("/Annot"));
+        field.replaceKey("/Subtype", QPDFObjectHandle::newName("/Widget"));
+        field.replaceKey("/FT", QPDFObjectHandle::newName("/Btn"));
+        field.replaceKey("/T", QPDFObjectHandle::newUnicodeString(field_name_utf8));
+        field.replaceKey("/V", QPDFObjectHandle::newName(state));
+        field.replaceKey("/AS", QPDFObjectHandle::newName(state));
+        field.replaceKey("/F", QPDFObjectHandle::newInteger(4));
+        field.replaceKey("/P", page_obj);
+        field.replaceKey("/AP", ap);
+
+        auto rect_arr = QPDFObjectHandle::newArray();
+        rect_arr.appendItem(QPDFObjectHandle::newReal(left));
+        rect_arr.appendItem(QPDFObjectHandle::newReal(bottom));
+        rect_arr.appendItem(QPDFObjectHandle::newReal(right));
+        rect_arr.appendItem(QPDFObjectHandle::newReal(top));
+        field.replaceKey("/Rect", rect_arr);
+
+        fields_arr.appendItem(field);
+        auto annots = page_obj.getKey("/Annots");
+        if (!annots.isArray()) {
+            annots = QPDFObjectHandle::newArray();
+            page_obj.replaceKey("/Annots", annots);
+        }
+        annots.appendItem(field);
+
+        QPDFWriter writer(pdf, dest_utf8_path);
+        writer.setCompressStreams(true);
+        writer.write();
+        return PV_OK;
+    } catch (const std::exception& ex) {
+        pv_internal::set_last_error(std::string("QPDF add checkbox failed: ") + ex.what());
+        return PV_ERR_QPDF_FAILED;
+    }
+}
+
+PV_API pv_status_t pv_qpdf_decrypt(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path) {
+    if (!src_utf8_path || !dest_utf8_path) {
+        pv_internal::set_last_error("Invalid arguments to pv_qpdf_decrypt");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    try {
+        QPDF pdf;
+        pdf.processFile(src_utf8_path, src_utf8_password ? src_utf8_password : "");
+        QPDFWriter writer(pdf, dest_utf8_path);
+        writer.setPreserveEncryption(false);
+        writer.setCompressStreams(true);
+        writer.write();
+        return PV_OK;
+    } catch (const std::exception& ex) {
+        pv_internal::set_last_error(std::string("QPDF decrypt failed: ") + ex.what());
+        return PV_ERR_QPDF_FAILED;
+    }
+}
+
+PV_API pv_status_t pv_qpdf_set_bookmarks(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    const pv_bookmark_t* bookmarks,
+    int32_t count) {
+    if (!src_utf8_path || !dest_utf8_path || (count > 0 && !bookmarks) || count < 0) {
+        pv_internal::set_last_error("Invalid arguments to pv_qpdf_set_bookmarks");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    try {
+        QPDF pdf;
+        pdf.processFile(src_utf8_path, src_utf8_password ? src_utf8_password : "");
+        auto root = pdf.getRoot();
+
+        if (count == 0) {
+            if (root.hasKey("/Outlines")) root.removeKey("/Outlines");
+            QPDFWriter writer(pdf, dest_utf8_path);
+            writer.setCompressStreams(true);
+            writer.write();
+            return PV_OK;
+        }
+
+        QPDFPageDocumentHelper pdh(pdf);
+        auto pages = pdh.getAllPages();
+
+        struct Node {
+            int level;
+            QPDFObjectHandle obj;
+            std::vector<int> children;
+        };
+
+        auto outlines = pdf.makeIndirectObject(QPDFObjectHandle::newDictionary());
+        outlines.replaceKey("/Type", QPDFObjectHandle::newName("/Outlines"));
+
+        std::vector<Node> nodes;
+        nodes.reserve(static_cast<size_t>(count) + 1);
+        nodes.push_back({-1, outlines, {}}); // index 0 = root /Outlines
+
+        std::vector<int> stack = {0};
+        for (int32_t i = 0; i < count; ++i) {
+            int lvl = std::max(0, bookmarks[i].level);
+            while (stack.size() > 1 && nodes[stack.back()].level >= lvl) {
+                stack.pop_back();
+            }
+            int parent_idx = stack.back();
+
+            auto item = pdf.makeIndirectObject(QPDFObjectHandle::newDictionary());
+            const char* title = bookmarks[i].title_utf8 ? bookmarks[i].title_utf8 : "Marcador";
+            item.replaceKey("/Title", QPDFObjectHandle::newUnicodeString(title));
+            item.replaceKey("/Parent", nodes[parent_idx].obj);
+
+            int p_idx = bookmarks[i].page_index;
+            if (p_idx >= 0 && static_cast<size_t>(p_idx) < pages.size()) {
+                auto dest = QPDFObjectHandle::newArray();
+                dest.appendItem(pages[static_cast<size_t>(p_idx)].getObjectHandle());
+                dest.appendItem(QPDFObjectHandle::newName("/Fit"));
+                item.replaceKey("/Dest", dest);
+            }
+
+            int cur_idx = static_cast<int>(nodes.size());
+            nodes.push_back({lvl, item, {}});
+            nodes[parent_idx].children.push_back(cur_idx);
+            stack.push_back(cur_idx);
+        }
+
+        for (size_t n = 0; n < nodes.size(); ++n) {
+            const auto& ch = nodes[n].children;
+            if (ch.empty()) continue;
+            nodes[n].obj.replaceKey("/First", nodes[ch.front()].obj);
+            nodes[n].obj.replaceKey("/Last", nodes[ch.back()].obj);
+            nodes[n].obj.replaceKey("/Count", QPDFObjectHandle::newInteger(static_cast<long long>(ch.size())));
+            for (size_t k = 0; k < ch.size(); ++k) {
+                if (k > 0) nodes[ch[k]].obj.replaceKey("/Prev", nodes[ch[k - 1]].obj);
+                if (k + 1 < ch.size()) nodes[ch[k]].obj.replaceKey("/Next", nodes[ch[k + 1]].obj);
+            }
+        }
+
+        root.replaceKey("/Outlines", outlines);
+
+        QPDFWriter writer(pdf, dest_utf8_path);
+        writer.setCompressStreams(true);
+        writer.write();
+        return PV_OK;
+    } catch (const std::exception& ex) {
+        pv_internal::set_last_error(std::string("QPDF set bookmarks failed: ") + ex.what());
+        return PV_ERR_QPDF_FAILED;
+    }
+}
+
 PV_API pv_status_t pv_qpdf_prepare_pades_signature(
     const char* src_utf8_path,
     const char* src_utf8_password,
@@ -927,8 +1149,36 @@ PV_API pv_status_t pv_qpdf_prepare_pades_signature(
     const char* reason_utf8,
     const char* location_utf8,
     int32_t reserved_bytes) {
+    return pv_qpdf_prepare_pades_signature_ex(
+        src_utf8_path,
+        src_utf8_password,
+        dest_utf8_path,
+        page_index,
+        rect,
+        signer_label_utf8,
+        reason_utf8,
+        location_utf8,
+        reserved_bytes,
+        nullptr,
+        0,
+        0);
+}
+
+PV_API pv_status_t pv_qpdf_prepare_pades_signature_ex(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    int32_t page_index,
+    const pv_rect_t* rect,
+    const char* signer_label_utf8,
+    const char* reason_utf8,
+    const char* location_utf8,
+    int32_t reserved_bytes,
+    const uint8_t* stamp_bgra_pixels,
+    int32_t stamp_width_px,
+    int32_t stamp_height_px) {
     if (!src_utf8_path || !dest_utf8_path || !rect || page_index < 0 || reserved_bytes < 1024) {
-        pv_internal::set_last_error("Invalid arguments to pv_qpdf_prepare_pades_signature");
+        pv_internal::set_last_error("Invalid arguments to pv_qpdf_prepare_pades_signature_ex");
         return PV_ERR_INVALID_ARG;
     }
 
@@ -946,6 +1196,9 @@ PV_API pv_status_t pv_qpdf_prepare_pades_signature(
         // Generate visible Form XObject appearance stream (/AP /N) for the signature widget
         double w = std::max(40.0, rect->right - rect->left);
         double h = std::max(24.0, rect->top - rect->bottom);
+        bool has_stamp_img = stamp_bgra_pixels != nullptr && stamp_width_px > 0 && stamp_height_px > 0;
+        double text_x = has_stamp_img ? std::min(w * 0.46, h * 1.35) : 6.0;
+
         std::string line1 = "Firmado: " + utf8_to_winansi_pdf_literal((signer_label_utf8 && *signer_label_utf8) ? signer_label_utf8 : "PDFVisor");
         std::string line2 = utf8_to_winansi_pdf_literal((reason_utf8 && *reason_utf8) ? reason_utf8 : "Firma digital PAdES");
         std::string line3 = "Fecha: " + current_pdf_date_utc();
@@ -953,10 +1206,24 @@ PV_API pv_status_t pv_qpdf_prepare_pades_signature(
         std::ostringstream ap_stream;
         ap_stream << "q\n"
                   << "0.95 0.97 1.0 rg 0 0 " << w << " " << h << " re f\n"
-                  << "0.15 0.38 0.72 RG 1 w 0.5 0.5 " << (w - 1.0) << " " << (h - 1.0) << " re S\n"
-                  << "BT /F1 8 Tf 0.08 0.16 0.35 rg 6 " << (h - 13.0) << " Td (" << line1 << ") Tj ET\n"
-                  << "BT /F1 7 Tf 0.2 0.2 0.2 rg 6 " << (h - 24.0) << " Td (" << line2 << ") Tj ET\n"
-                  << "BT /F1 6.5 Tf 0.35 0.35 0.35 rg 6 " << (h - 34.0) << " Td (" << line3 << ") Tj ET\n"
+                  << "0.15 0.38 0.72 RG 1 w 0.5 0.5 " << (w - 1.0) << " " << (h - 1.0) << " re S\n";
+        if (has_stamp_img) {
+            double img_box_w = std::max(12.0, text_x - 8.0);
+            double img_box_h = std::max(12.0, h - 8.0);
+            double aspect = static_cast<double>(stamp_width_px) / std::max(1, stamp_height_px);
+            double draw_w = img_box_w;
+            double draw_h = draw_w / std::max(0.1, aspect);
+            if (draw_h > img_box_h) {
+                draw_h = img_box_h;
+                draw_w = draw_h * aspect;
+            }
+            double ix = 4.0 + (img_box_w - draw_w) * 0.5;
+            double iy = 4.0 + (img_box_h - draw_h) * 0.5;
+            ap_stream << "q " << draw_w << " 0 0 " << draw_h << " " << ix << " " << iy << " cm /ImSig Do Q\n";
+        }
+        ap_stream << "BT /F1 8 Tf 0.08 0.16 0.35 rg " << text_x << " " << (h - 13.0) << " Td (" << line1 << ") Tj ET\n"
+                  << "BT /F1 7 Tf 0.2 0.2 0.2 rg " << text_x << " " << (h - 24.0) << " Td (" << line2 << ") Tj ET\n"
+                  << "BT /F1 6.5 Tf 0.35 0.35 0.35 rg " << text_x << " " << (h - 34.0) << " Td (" << line3 << ") Tj ET\n"
                   << "Q\n";
 
         const size_t hex_len = static_cast<size_t>(reserved_bytes) * 2;
@@ -965,7 +1232,7 @@ PV_API pv_status_t pv_qpdf_prepare_pades_signature(
 
         // True incremental co-signing: if the PDF already contains digital signatures, append an ISO 32000
         // incremental update at EOF so all prior signatures remain byte-for-byte intact and valid!
-        if (has_existing_signatures(pdf) && !pdf.isEncrypted()) {
+        if (has_existing_signatures(pdf) && !pdf.isEncrypted() && !has_stamp_img) {
             if (!append_incremental_pades_revision(
                     pdf, src_fs_path, dest_fs_path, page_obj, rect, ap_stream.str(), w, h, reason_utf8, location_utf8, hex_len)) {
                 return PV_ERR_QPDF_FAILED;
@@ -1032,6 +1299,33 @@ PV_API pv_status_t pv_qpdf_prepare_pades_signature(
         ap_fonts.replaceKey("/F1", pdf.makeIndirectObject(
             QPDFObjectHandle::parse("<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>")));
         ap_res.replaceKey("/Font", ap_fonts);
+
+        if (has_stamp_img) {
+            // Composite BGRA stamp onto white RGB background for clean PDF Image XObject
+            std::string rgb_bytes;
+            rgb_bytes.resize(static_cast<size_t>(stamp_width_px) * static_cast<size_t>(stamp_height_px) * 3);
+            for (int32_t i = 0; i < stamp_width_px * stamp_height_px; ++i) {
+                uint8_t b = stamp_bgra_pixels[i * 4 + 0];
+                uint8_t g = stamp_bgra_pixels[i * 4 + 1];
+                uint8_t r = stamp_bgra_pixels[i * 4 + 2];
+                uint8_t a = stamp_bgra_pixels[i * 4 + 3];
+                rgb_bytes[static_cast<size_t>(i) * 3 + 0] = static_cast<char>((r * a + 242 * (255 - a)) / 255);
+                rgb_bytes[static_cast<size_t>(i) * 3 + 1] = static_cast<char>((g * a + 247 * (255 - a)) / 255);
+                rgb_bytes[static_cast<size_t>(i) * 3 + 2] = static_cast<char>((b * a + 255 * (255 - a)) / 255);
+            }
+            auto img_stream = QPDFObjectHandle::newStream(&pdf, rgb_bytes);
+            img_stream.getDict().replaceKey("/Type", QPDFObjectHandle::newName("/XObject"));
+            img_stream.getDict().replaceKey("/Subtype", QPDFObjectHandle::newName("/Image"));
+            img_stream.getDict().replaceKey("/Width", QPDFObjectHandle::newInteger(stamp_width_px));
+            img_stream.getDict().replaceKey("/Height", QPDFObjectHandle::newInteger(stamp_height_px));
+            img_stream.getDict().replaceKey("/ColorSpace", QPDFObjectHandle::newName("/DeviceRGB"));
+            img_stream.getDict().replaceKey("/BitsPerComponent", QPDFObjectHandle::newInteger(8));
+
+            auto xobjs = QPDFObjectHandle::newDictionary();
+            xobjs.replaceKey("/ImSig", img_stream);
+            ap_res.replaceKey("/XObject", xobjs);
+        }
+
         ap_dict.replaceKey("/Resources", ap_res);
         auto ap_obj = QPDFObjectHandle::newStream(&pdf, ap_stream.str());
         ap_obj.replaceDict(ap_dict);

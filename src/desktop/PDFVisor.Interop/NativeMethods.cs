@@ -169,6 +169,74 @@ internal struct PvLinkInfoNative
 
 public sealed record PdfLinkTarget(bool Found, int? DestPageIndex, string? Uri);
 
+public enum PdfAnnotSubtype : int
+{
+    Unknown = 0,
+    Text = 1,
+    Link = 2,
+    FreeText = 3,
+    Line = 4,
+    Square = 5,
+    Circle = 6,
+    Highlight = 9,
+    Underline = 10,
+    Squiggly = 11,
+    StrikeOut = 12,
+    Stamp = 13,
+    Ink = 15,
+    Popup = 16,
+    Widget = 20
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct PvAnnotInfoNative
+{
+    public int Index;
+    public int Subtype;
+    public PvRect Rect;
+    public uint ColorRgba;
+    public nint ContentsUtf8;
+}
+
+public sealed record PdfAnnotationInfo(
+    int PageIndex,
+    int Index,
+    PdfAnnotSubtype Subtype,
+    PvRect Rect,
+    uint ColorRgba,
+    string Contents)
+{
+    public string TypeDisplay => Subtype switch
+    {
+        PdfAnnotSubtype.Text => "Nota",
+        PdfAnnotSubtype.Highlight => "Resaltado",
+        PdfAnnotSubtype.Underline => "Subrayado",
+        PdfAnnotSubtype.StrikeOut => "Tachado",
+        PdfAnnotSubtype.Square => "Rectángulo",
+        PdfAnnotSubtype.Ink => "Trazo",
+        _ => Subtype.ToString()
+    };
+
+    public string DisplaySummary => string.IsNullOrWhiteSpace(Contents)
+        ? $"Pág. {PageIndex + 1} • {TypeDisplay}"
+        : $"Pág. {PageIndex + 1} • {TypeDisplay}: {Contents}";
+}
+
+[StructLayout(LayoutKind.Sequential)]
+internal struct PvAttachmentInfoNative
+{
+    public int Index;
+    public long SizeBytes;
+    public nint NameUtf8;
+}
+
+public sealed record PdfAttachmentInfo(int Index, long SizeBytes, string Name)
+{
+    public string SizeDisplay => SizeBytes >= 1024 * 1024
+        ? $"{SizeBytes / (1024.0 * 1024.0):0.00} MB"
+        : $"{Math.Max(0.1, SizeBytes / 1024.0):0.0} KB";
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct PvRenderOptions
 {
@@ -207,6 +275,18 @@ internal static class NativeMethods
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern PvStatus pv_doc_append_blank_page(nint doc, double widthPt, double heightPt, out int outPageIndex);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_doc_insert_blank_page(nint doc, int insertAtIndex, double widthPt, double heightPt, out int outPageIndex);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_get_crop_box(nint doc, int pageIndex, out PvRect outBox);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_set_crop_box(nint doc, int pageIndex, ref PvRect box);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_doc_flatten_all(nint doc);
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern void pv_doc_close(nint doc);
@@ -295,6 +375,36 @@ internal static class NativeMethods
         int pageIndex,
         int annotIndex);
 
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_get_annotations(
+        nint doc,
+        int pageIndex,
+        out nint outAnnots,
+        out int outCount);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void pv_free_annotations(nint annots, int count);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_add_text_markup_annot(
+        nint doc,
+        int pageIndex,
+        int subtype,
+        [In] PvRect[] quadRects,
+        int rectCount,
+        uint rgba,
+        out int outAnnotIndex);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_update_annot(
+        nint doc,
+        int pageIndex,
+        int annotIndex,
+        nint newRectOrNull,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? newContentsOrNull,
+        int updateColor,
+        uint newRgba);
+
     /* QPDF Optimization & AES-256 Encryption */
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern PvStatus pv_qpdf_optimize(
@@ -364,6 +474,45 @@ internal static class NativeMethods
         [MarshalAs(UnmanagedType.LPUTF8Str)] string fieldNameUtf8);
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_qpdf_add_checkbox_field(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destUtf8Path,
+        int pageIndex,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string fieldNameUtf8,
+        ref PvRect rect,
+        int initiallyChecked);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_qpdf_decrypt(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destUtf8Path);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe PvStatus pv_qpdf_set_bookmarks(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destUtf8Path,
+        PvBookmarkNative* bookmarks,
+        int count);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe PvStatus pv_qpdf_prepare_pades_signature_ex(
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destUtf8Path,
+        int pageIndex,
+        ref PvRect rect,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? signerLabelUtf8,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? reasonUtf8,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string? locationUtf8,
+        int reservedBytes,
+        byte* stampBgraPixels,
+        int stampWidthPx,
+        int stampHeightPx);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern PvStatus pv_qpdf_prepare_pades_signature(
         [MarshalAs(UnmanagedType.LPUTF8Str)] string srcUtf8Path,
         [MarshalAs(UnmanagedType.LPUTF8Str)] string? srcUtf8Password,
@@ -409,6 +558,40 @@ internal static class NativeMethods
         int objIndex,
         double dxPt,
         double dyPt);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_page_set_image_bounds(
+        nint doc,
+        int pageIndex,
+        int objIndex,
+        ref PvRect newRect);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_doc_get_attachments(
+        nint doc,
+        out nint outAttachments,
+        out int outCount);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void pv_free_attachments(nint attachments, int count);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern unsafe PvStatus pv_doc_add_attachment(
+        nint doc,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string nameUtf8,
+        byte* data,
+        int dataLen);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_doc_extract_attachment(
+        nint doc,
+        int index,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string destUtf8Path);
+
+    [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
+    internal static extern PvStatus pv_doc_delete_attachment(
+        nint doc,
+        int index);
 
     [DllImport(EngineDll, CallingConvention = CallingConvention.Cdecl)]
     internal static extern PvStatus pv_page_remove_object(

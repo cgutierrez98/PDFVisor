@@ -116,6 +116,20 @@ typedef struct pv_link_info_t {
     char* uri_utf8;          /* non-null for external URI links; free with pv_free_string */
 } pv_link_info_t;
 
+typedef struct pv_annot_info_t {
+    int32_t index;
+    int32_t subtype;         /* 1=Text(Note), 5=Square, 9=Highlight, 10=Underline, 12=StrikeOut, 15=Ink, 20=Widget */
+    pv_rect_t rect;
+    uint32_t color_rgba;
+    char* contents_utf8;
+} pv_annot_info_t;
+
+typedef struct pv_attachment_info_t {
+    int32_t index;
+    int64_t size_bytes;
+    char* name_utf8;
+} pv_attachment_info_t;
+
 typedef struct pv_render_options_t {
     int32_t width_px;
     int32_t height_px;
@@ -135,6 +149,10 @@ PV_API const char* pv_get_last_error(void);
 PV_API pv_status_t pv_doc_open(const char* utf8_path, const char* utf8_password, pv_document_handle* out_doc);
 PV_API pv_status_t pv_doc_create_blank(double width_pt, double height_pt, pv_document_handle* out_doc);
 PV_API pv_status_t pv_doc_append_blank_page(pv_document_handle doc, double width_pt, double height_pt, int32_t* out_page_index);
+PV_API pv_status_t pv_doc_insert_blank_page(pv_document_handle doc, int32_t insert_at_index, double width_pt, double height_pt, int32_t* out_page_index);
+PV_API pv_status_t pv_page_get_crop_box(pv_document_handle doc, int32_t page_index, pv_rect_t* out_box);
+PV_API pv_status_t pv_page_set_crop_box(pv_document_handle doc, int32_t page_index, const pv_rect_t* box);
+PV_API pv_status_t pv_doc_flatten_all(pv_document_handle doc);
 PV_API void        pv_doc_close(pv_document_handle doc);
 PV_API int32_t     pv_doc_get_page_count(pv_document_handle doc);
 PV_API pv_status_t pv_doc_get_page_size(pv_document_handle doc, int32_t page_index, pv_page_size_t* out_size);
@@ -190,6 +208,32 @@ PV_API pv_status_t pv_page_remove_annot(
     pv_document_handle doc,
     int32_t page_index,
     int32_t annot_index);
+
+PV_API pv_status_t pv_page_get_annotations(
+    pv_document_handle doc,
+    int32_t page_index,
+    pv_annot_info_t** out_annots,
+    int32_t* out_count);
+
+PV_API void pv_free_annotations(pv_annot_info_t* annots, int32_t count);
+
+PV_API pv_status_t pv_page_add_text_markup_annot(
+    pv_document_handle doc,
+    int32_t page_index,
+    int32_t subtype,
+    const pv_rect_t* quad_rects,
+    int32_t rect_count,
+    uint32_t rgba,
+    int32_t* out_annot_index);
+
+PV_API pv_status_t pv_page_update_annot(
+    pv_document_handle doc,
+    int32_t page_index,
+    int32_t annot_index,
+    const pv_rect_t* new_rect_or_null,
+    const char* new_contents_or_null,
+    int32_t update_color,
+    uint32_t new_rgba);
 
 /* Phase 2: QPDF Structural Optimization, Linearization & AES-256 Encryption */
 PV_API pv_status_t pv_qpdf_optimize(
@@ -251,6 +295,41 @@ PV_API pv_status_t pv_qpdf_remove_form_field(
     const char* dest_utf8_path,
     const char* field_name_utf8);
 
+PV_API pv_status_t pv_qpdf_add_checkbox_field(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    int32_t page_index,
+    const char* field_name_utf8,
+    const pv_rect_t* rect,
+    int32_t initially_checked);
+
+PV_API pv_status_t pv_qpdf_decrypt(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path);
+
+PV_API pv_status_t pv_qpdf_set_bookmarks(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    const pv_bookmark_t* bookmarks,
+    int32_t count);
+
+PV_API pv_status_t pv_qpdf_prepare_pades_signature_ex(
+    const char* src_utf8_path,
+    const char* src_utf8_password,
+    const char* dest_utf8_path,
+    int32_t page_index,
+    const pv_rect_t* rect,
+    const char* signer_label_utf8,
+    const char* reason_utf8,
+    const char* location_utf8,
+    int32_t reserved_bytes,
+    const uint8_t* stamp_bgra_pixels,
+    int32_t stamp_width_px,
+    int32_t stamp_height_px);
+
 PV_API pv_status_t pv_qpdf_prepare_pades_signature(
     const char* src_utf8_path,
     const char* src_utf8_password,
@@ -289,6 +368,35 @@ PV_API pv_status_t pv_page_move_object(
     int32_t obj_index,
     double dx_pt,
     double dy_pt);
+
+PV_API pv_status_t pv_page_set_image_bounds(
+    pv_document_handle doc,
+    int32_t page_index,
+    int32_t obj_index,
+    const pv_rect_t* new_rect);
+
+/* Embedded File Attachments */
+PV_API pv_status_t pv_doc_get_attachments(
+    pv_document_handle doc,
+    pv_attachment_info_t** out_attachments,
+    int32_t* out_count);
+
+PV_API void pv_free_attachments(pv_attachment_info_t* attachments, int32_t count);
+
+PV_API pv_status_t pv_doc_add_attachment(
+    pv_document_handle doc,
+    const char* name_utf8,
+    const uint8_t* data,
+    int32_t data_len);
+
+PV_API pv_status_t pv_doc_extract_attachment(
+    pv_document_handle doc,
+    int32_t index,
+    const char* dest_utf8_path);
+
+PV_API pv_status_t pv_doc_delete_attachment(
+    pv_document_handle doc,
+    int32_t index);
 
 PV_API pv_status_t pv_page_remove_object(
     pv_document_handle doc,

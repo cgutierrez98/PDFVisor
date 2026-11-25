@@ -1,0 +1,41 @@
+<Window x:Class="PDFVisor.App.Dialogs.EncryptPdfDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Proteger documento PDF (AES-256)"
+        Width="440"
+        SizeToContent="Height"
+        ResizeMode="NoResize"
+        WindowStartupLocation="CenterOwner"
+        ShowInTaskbar="False">
+    <StackPanel Margin="20">
+        <TextBlock Text="Cifrado estándar AES de 256 bits" FontSize="15" FontWeight="SemiBold"/>
+        <TextBlock Text="Configura las contraseñas de apertura y propietario junto con los permisos del documento."
+                   Opacity="0.72" FontSize="12" TextWrapping="Wrap" Margin="0,3,0,14"/>
+
+        <TextBlock Text="Contraseña de apertura (usuario):" FontSize="12.5" Margin="0,0,0,4"/>
+        <PasswordBox x:Name="PwdUser" Padding="8,6" Margin="0,0,0,10"/>
+
+        <TextBlock Text="Contraseña de permisos / propietario (opcional):" FontSize="12.5" Margin="0,0,0,4"/>
+        <PasswordBox x:Name="PwdOwner" Padding="8,6" Margin="0,0,0,14"
+                     ToolTip="Si se deja en blanco se usará la misma contraseña de apertura"/>
+
+        <TextBlock Text="Permisos permitidos sin contraseña de propietario:" FontSize="12.5" FontWeight="Medium" Margin="0,0,0,6"/>
+        <CheckBox x:Name="ChkAllowPrint" Content="Permitir impresión del documento" IsChecked="True" Margin="0,0,0,6"/>
+        <CheckBox x:Name="ChkAllowExtract" Content="Permitir copiar y extraer texto o imágenes" IsChecked="False" Margin="0,0,0,6"/>
+        <CheckBox x:Name="ChkAllowModify" Content="Permitir modificar páginas, formularios y anotaciones" IsChecked="False" Margin="0,0,0,18"/>
+
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Proteger y guardar..."
+                    IsDefault="True"
+                    Click="BtnOk_Click"
+                    Style="{StaticResource PrimaryAccentButton}"
+                    Padding="18,6"
+                    FontSize="13"
+                    Margin="0,0,8,0"/>
+            <Button Content="Cancelar"
+                    IsCancel="True"
+                    Style="{StaticResource SecondaryButton}"
+                    Padding="16,6"/>
+        </StackPanel>
+    </StackPanel>
+</Window>

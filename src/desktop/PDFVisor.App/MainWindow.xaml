@@ -9,6 +9,8 @@
         AllowDrop="True"
         Drop="Window_Drop"
         DragOver="Window_DragOver"
+        PreviewKeyDown="Window_PreviewKeyDown"
+        PreviewKeyUp="Window_PreviewKeyUp"
         KeyDown="Window_KeyDown"
         WindowStartupLocation="CenterScreen">
     <Grid>
@@ -16,8 +18,8 @@
 
         <!-- 1. Classic Native Menu Bar -->
         <Menu x:Name="MainMenuBar" DockPanel.Dock="Top" Padding="6,2">
-            <MenuItem Header="_Archivo">
-                <MenuItem Header="_Abrir..." InputGestureText="Ctrl+O" Click="BtnOpen_Click"/>
+            <MenuItem x:Name="MenuRootFile" Header="_Archivo">
+                <MenuItem x:Name="MenuOpen" Header="_Abrir..." InputGestureText="Ctrl+O" Click="BtnOpen_Click"/>
                 <MenuItem Header="Crear PDF desde _imágenes..." Click="MenuCreateFromImages_Click"/>
                 <Separator/>
                 <MenuItem x:Name="MenuSave" Header="_Guardar" InputGestureText="Ctrl+S" Click="BtnSave_Click"/>
@@ -28,11 +30,12 @@
                 <MenuItem x:Name="MenuOptimize" Header="_Optimizar tamaño y carga rápida..." Click="BtnOptimize_Click"/>
                 <MenuItem x:Name="MenuPrint" Header="_Imprimir..." InputGestureText="Ctrl+P" Click="BtnPrint_Click"/>
                 <Separator/>
+                <MenuItem x:Name="MenuRestoreTabs" Header="_Restaurar pestañas al iniciar" IsCheckable="True" Click="MenuRestoreTabs_Click"/>
                 <MenuItem x:Name="MenuCloseTab" Header="Cerrar _pestaña" InputGestureText="Ctrl+W" Click="MenuCloseTab_Click"/>
-                <MenuItem Header="_Salir" InputGestureText="Alt+F4" Click="MenuExit_Click"/>
+                <MenuItem x:Name="MenuExit" Header="_Salir" InputGestureText="Alt+F4" Click="MenuExit_Click"/>
             </MenuItem>
 
-            <MenuItem Header="_Editar">
+            <MenuItem x:Name="MenuRootEdit" Header="_Editar">
                 <MenuItem x:Name="MenuUndo" Header="_Deshacer" InputGestureText="Ctrl+Z" Click="BtnUndo_Click"/>
                 <MenuItem x:Name="MenuRedo" Header="_Rehacer" InputGestureText="Ctrl+Y" Click="BtnRedo_Click"/>
                 <Separator/>
@@ -40,21 +43,33 @@
                 <MenuItem x:Name="MenuFind" Header="_Buscar..." InputGestureText="Ctrl+F" Click="BtnToggleSearch_Click"/>
                 <Separator/>
                 <MenuItem x:Name="MenuInsertImage" Header="Insertar _imagen..." Click="BtnInsertImage_Click"/>
-                <MenuItem x:Name="MenuAddTextField" Header="Añadir _campo de formulario..." Click="BtnAddTextField_Click"/>
+                <MenuItem x:Name="MenuAddTextField" Header="Añadir campo de _texto..." Click="BtnAddTextField_Click"/>
+                <MenuItem x:Name="MenuAddCheckboxField" Header="Añadir _casilla de verificación..." Click="BtnAddCheckboxField_Click"/>
             </MenuItem>
 
-            <MenuItem Header="_Ver">
+            <MenuItem x:Name="MenuRootView" Header="_Ver">
+                <MenuItem x:Name="MenuNavBack" Header="Ir _atrás" InputGestureText="Alt+Izq" Click="BtnNavBack_Click"/>
+                <MenuItem x:Name="MenuNavForward" Header="Ir a_delante" InputGestureText="Alt+Der" Click="BtnNavForward_Click"/>
+                <Separator/>
                 <MenuItem x:Name="MenuZoomIn" Header="_Acercar" InputGestureText="Ctrl++" Click="BtnZoomIn_Click"/>
                 <MenuItem x:Name="MenuZoomOut" Header="_Alejar" InputGestureText="Ctrl+-" Click="BtnZoomOut_Click"/>
                 <MenuItem x:Name="MenuResetZoom" Header="Tamaño _real (100%)" InputGestureText="Ctrl+0" Click="BtnResetZoom_Click"/>
                 <MenuItem x:Name="MenuFitWidth" Header="Ajustar al _ancho" Click="BtnFitWidth_Click"/>
+                <MenuItem x:Name="MenuFitPage" Header="Ajustar a la _página completa" Click="BtnFitPage_Click"/>
                 <Separator/>
                 <MenuItem x:Name="MenuTwoPage" Header="Vista a _doble página (Modo libro)" IsCheckable="True" Click="MenuTwoPage_Click"/>
                 <MenuItem x:Name="MenuDarkRead" Header="Modo _lectura oscuro" IsCheckable="True" Click="MenuDarkRead_Click"/>
                 <MenuItem x:Name="MenuFullscreen" Header="_Pantalla completa" InputGestureText="F11" IsCheckable="True" Click="MenuFullscreen_Click"/>
+                <Separator/>
+                <MenuItem x:Name="MenuRootLanguage" Header="_Idioma">
+                    <MenuItem x:Name="MenuLangEs" Header="Español" Tag="es" IsCheckable="True" Click="MenuLang_Click"/>
+                    <MenuItem x:Name="MenuLangEn" Header="English" Tag="en" IsCheckable="True" Click="MenuLang_Click"/>
+                </MenuItem>
             </MenuItem>
 
-            <MenuItem Header="_Páginas">
+            <MenuItem x:Name="MenuRootPages" Header="_Páginas">
+                <MenuItem x:Name="MenuInsertBlankPage" Header="_Insertar página en blanco" Click="BtnInsertBlankPage_Click"/>
+                <MenuItem x:Name="MenuCropPage" Header="Re_cortar márgenes de página..." Click="BtnCropPage_Click"/>
                 <MenuItem x:Name="MenuRotatePage" Header="_Rotar 90° a la derecha" Click="BtnRotatePage_Click"/>
                 <MenuItem x:Name="MenuMoveUp" Header="Mover página _arriba" Click="BtnMoveUp_Click"/>
                 <MenuItem x:Name="MenuMoveDown" Header="Mover página a_bajo" Click="BtnMoveDown_Click"/>
@@ -65,22 +80,24 @@
                 <MenuItem x:Name="MenuDeletePage" Header="E_liminar página actual" Click="BtnDeletePage_Click"/>
             </MenuItem>
 
-            <MenuItem Header="_Herramientas">
+            <MenuItem x:Name="MenuRootTools" Header="_Herramientas">
                 <MenuItem x:Name="MenuWatermark" Header="_Marca de agua y numeración..." Click="MenuWatermark_Click"/>
                 <MenuItem x:Name="MenuComparePdf" Header="_Comparar con otro PDF..." Click="MenuComparePdf_Click"/>
+                <MenuItem x:Name="MenuFlattenPdf" Header="_Aplanar formularios y anotaciones" Click="BtnFlattenPdf_Click"/>
                 <Separator/>
                 <MenuItem x:Name="MenuOcrPage" Header="Reconocer texto (_OCR) en página actual" Click="BtnOcrPage_Click"/>
                 <MenuItem x:Name="MenuOcrAll" Header="Reconocer texto (OCR) en _todo el documento" Click="BtnOcrAll_Click"/>
             </MenuItem>
 
-            <MenuItem Header="_Seguridad">
+            <MenuItem x:Name="MenuRootSecurity" Header="_Seguridad">
                 <MenuItem x:Name="MenuSignPades" Header="_Firmar digitalmente..." Click="BtnSignPades_Click"/>
-                <MenuItem x:Name="MenuEncrypt" Header="_Proteger con contraseña..." Click="BtnEncrypt_Click"/>
+                <MenuItem x:Name="MenuEncrypt" Header="_Proteger con contraseña y permisos..." Click="BtnEncrypt_Click"/>
+                <MenuItem x:Name="MenuDecrypt" Header="_Quitar contraseña y exportar..." Click="BtnDecrypt_Click"/>
                 <Separator/>
                 <MenuItem x:Name="MenuSanitize" Header="_Sanear metadatos e historial..." Click="BtnSanitize_Click"/>
             </MenuItem>
 
-            <MenuItem Header="A_yuda">
+            <MenuItem x:Name="MenuRootHelp" Header="A_yuda">
                 <MenuItem Header="Buscar _actualizaciones..." Click="MenuCheckUpdates_Click"/>
                 <MenuItem Header="_Informar de un problema..." Click="MenuReportIssue_Click"/>
                 <MenuItem Header="Abrir carpeta de _logs" Click="MenuOpenLogs_Click"/>
@@ -128,7 +145,7 @@
         <!-- 2. Clean Single-Row Fluent Icon Toolbar (shown when a document is open) -->
         <Border x:Name="ToolbarBorder" DockPanel.Dock="Top" BorderBrush="#22888888" BorderThickness="0,1,0,1" Padding="10,4" Visibility="Collapsed">
             <DockPanel LastChildFill="False">
-                <!-- Left: File, History, Navigation, Zoom -->
+                <!-- Left: File, History, Back/Forward, Page Jump, Zoom -->
                 <StackPanel DockPanel.Dock="Left" Orientation="Horizontal" VerticalAlignment="Center">
                     <Button x:Name="BtnOpen" Style="{StaticResource IconToolbarButton}" Content="&#xE8E5;" Click="BtnOpen_Click" ToolTip="Abrir PDF (Ctrl+O)"/>
                     <Button x:Name="BtnSave" Style="{StaticResource IconToolbarButton}" Content="&#xE74E;" Click="BtnSave_Click" ToolTip="Guardar (Ctrl+S)"/>
@@ -140,6 +157,9 @@
                     <Button x:Name="BtnRedo" Style="{StaticResource IconToolbarButton}" Content="&#xE7A6;" Click="BtnRedo_Click" ToolTip="Rehacer (Ctrl+Y)"/>
 
                     <Border Style="{StaticResource ToolbarDivider}"/>
+
+                    <Button x:Name="BtnNavBack" Style="{StaticResource IconToolbarButton}" Content="&#xE72B;" Click="BtnNavBack_Click" ToolTip="Volver a vista anterior (Alt+Izq)"/>
+                    <Button x:Name="BtnNavForward" Style="{StaticResource IconToolbarButton}" Content="&#xE72A;" Click="BtnNavForward_Click" ToolTip="Avanzar vista (Alt+Der)"/>
 
                     <Button x:Name="BtnPrev" Style="{StaticResource IconToolbarButton}" Content="&#xE76B;" Click="BtnPrev_Click" ToolTip="Página anterior"/>
                     <TextBox x:Name="TxtPageJump"
@@ -158,7 +178,7 @@
 
                     <Button x:Name="BtnZoomOut" Style="{StaticResource IconToolbarButton}" Content="&#xE71F;" Click="BtnZoomOut_Click" ToolTip="Alejar (Ctrl+-)"/>
                     <ComboBox x:Name="CmbZoom"
-                              Width="88"
+                              Width="92"
                               Height="26"
                               Margin="2,0"
                               VerticalContentAlignment="Center"
@@ -170,7 +190,8 @@
                         <ComboBoxItem Content="125%"/>
                         <ComboBoxItem Content="150%"/>
                         <ComboBoxItem Content="200%"/>
-                        <ComboBoxItem Content="Ajustar"/>
+                        <ComboBoxItem Content="Ancho"/>
+                        <ComboBoxItem Content="Página"/>
                     </ComboBox>
                     <Button x:Name="BtnZoomIn" Style="{StaticResource IconToolbarButton}" Content="&#xE8A3;" Click="BtnZoomIn_Click" ToolTip="Acercar (Ctrl++)"/>
                     <Button x:Name="BtnRotatePage" Style="{StaticResource IconToolbarButton}" Content="&#xE7AD;" Click="BtnRotatePage_Click" ToolTip="Rotar página 90°"/>
@@ -178,7 +199,6 @@
 
                 <!-- Right: Color/Font Options (when annotating), Segmented Tools Pill & View Actions -->
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
-                    <!-- Contextual Color & Font Size Bar (visible only when an annotation/text tool is active) -->
                     <StackPanel x:Name="ToolOptionsBar" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,8,0" Visibility="Collapsed">
                         <Button Tag="FFEA00FF" Click="ColorSwatch_Click" Width="18" Height="18" Margin="2,0" Cursor="Hand" ToolTip="Amarillo" BorderThickness="1" BorderBrush="#66FFFFFF" Background="#FFEA00"/>
                         <Button Tag="43A047FF" Click="ColorSwatch_Click" Width="18" Height="18" Margin="2,0" Cursor="Hand" ToolTip="Verde" BorderThickness="1" BorderBrush="#66FFFFFF" Background="#43A047"/>
@@ -204,8 +224,11 @@
 
                     <Border Background="#10888888" BorderBrush="#22888888" BorderThickness="1" CornerRadius="6" Padding="2">
                         <StackPanel Orientation="Horizontal">
-                            <ToggleButton x:Name="ToolSelect" Style="{StaticResource ToolToggleButton}" Content="&#xE7C9;" IsChecked="True" Click="ToolButton_Click" ToolTip="Seleccionar texto"/>
-                            <ToggleButton x:Name="ToolHighlight" Style="{StaticResource ToolToggleButton}" Content="&#xE7E6;" Click="ToolButton_Click" ToolTip="Resaltar"/>
+                            <ToggleButton x:Name="ToolSelect" Style="{StaticResource ToolToggleButton}" Content="&#xE7C9;" IsChecked="True" Click="ToolButton_Click" ToolTip="Seleccionar texto / objetos"/>
+                            <ToggleButton x:Name="ToolHand" Style="{StaticResource ToolToggleButton}" Content="&#xE7C2;" Click="ToolButton_Click" ToolTip="Mano / desplazar página (o mantén Espacio)"/>
+                            <ToggleButton x:Name="ToolHighlight" Style="{StaticResource ToolToggleButton}" Content="&#xE7E6;" Click="ToolButton_Click" ToolTip="Resaltar texto"/>
+                            <ToggleButton x:Name="ToolUnderline" Style="{StaticResource ToolToggleButton}" Content="&#xE8DC;" Click="ToolButton_Click" ToolTip="Subrayar texto"/>
+                            <ToggleButton x:Name="ToolStrikeOut" Style="{StaticResource ToolToggleButton}" Content="&#xEDE0;" Click="ToolButton_Click" ToolTip="Tachar texto"/>
                             <ToggleButton x:Name="ToolSquare" Style="{StaticResource ToolToggleButton}" Content="&#xE739;" Click="ToolButton_Click" ToolTip="Dibujar rectángulo"/>
                             <ToggleButton x:Name="ToolNote" Style="{StaticResource ToolToggleButton}" Content="&#xE70B;" Click="ToolButton_Click" ToolTip="Añadir nota adhesiva"/>
                             <ToggleButton x:Name="ToolInk" Style="{StaticResource ToolToggleButton}" Content="&#xE76D;" Click="ToolButton_Click" ToolTip="Dibujo a mano alzada"/>
@@ -222,7 +245,7 @@
             </DockPanel>
         </Border>
 
-        <!-- 3. Modern Document Tab Strip -->
+        <!-- 3. Modern Document Tab Strip (middle-click close & drag-to-reorder) -->
         <Border x:Name="TabStripBorder" DockPanel.Dock="Top" BorderBrush="#22888888" BorderThickness="0,0,0,1" Padding="6,3,6,2" Visibility="Collapsed">
             <DockPanel LastChildFill="True">
                 <Button DockPanel.Dock="Right"
@@ -232,6 +255,10 @@
                         Click="BtnOpen_Click"
                         ToolTip="Abrir otro PDF (Ctrl+O)"/>
                 <ListBox x:Name="DocumentTabs"
+                         AllowDrop="True"
+                         PreviewMouseDown="DocumentTabs_PreviewMouseDown"
+                         PreviewMouseMove="DocumentTabs_PreviewMouseMove"
+                         Drop="DocumentTabs_Drop"
                          SelectionChanged="DocumentTabs_SelectionChanged"
                          BorderThickness="0"
                          Background="Transparent"
@@ -257,7 +284,7 @@
                                         Padding="0"
                                         BorderThickness="0"
                                         Background="Transparent"
-                                        ToolTip="Cerrar pestaña (Ctrl+W)"/>
+                                        ToolTip="Cerrar pestaña (Ctrl+W / Clic central)"/>
                             </StackPanel>
                         </DataTemplate>
                     </ListBox.ItemTemplate>
@@ -293,18 +320,20 @@
             <Grid x:Name="WorkspaceContainer" Visibility="Collapsed">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="44"/>
-                    <ColumnDefinition x:Name="SidePanelColumn" Width="240"/>
+                    <ColumnDefinition x:Name="SidePanelColumn" Width="250"/>
                     <ColumnDefinition x:Name="SideSplitterColumn" Width="4"/>
                     <ColumnDefinition Width="*"/>
                 </Grid.ColumnDefinitions>
 
-                <!-- Vertical Activity Rail (Acrobat / VS Code style) -->
+                <!-- Vertical Activity Rail -->
                 <Border Grid.Column="0" BorderBrush="#22888888" BorderThickness="0,0,1,0">
                     <StackPanel Orientation="Vertical" Margin="0,6,0,0">
                         <ToggleButton x:Name="RailThumbnails" Style="{StaticResource RailIconButton}" Content="&#xE80A;" IsChecked="True" Click="RailButton_Click" ToolTip="Miniaturas de páginas"/>
                         <ToggleButton x:Name="RailBookmarks" Style="{StaticResource RailIconButton}" Content="&#xE8A4;" Click="RailButton_Click" ToolTip="Marcadores / Índice"/>
+                        <ToggleButton x:Name="RailComments" Style="{StaticResource RailIconButton}" Content="&#xE90A;" Click="RailButton_Click" ToolTip="Comentarios y anotaciones"/>
                         <ToggleButton x:Name="RailForms" Style="{StaticResource RailIconButton}" Content="&#xE8F1;" Click="RailButton_Click" ToolTip="Campos de formulario"/>
                         <ToggleButton x:Name="RailSignatures" Style="{StaticResource RailIconButton}" Content="&#xE8D7;" Click="RailButton_Click" ToolTip="Firmas digitales"/>
+                        <ToggleButton x:Name="RailAttachments" Style="{StaticResource RailIconButton}" Content="&#xE723;" Click="RailButton_Click" ToolTip="Archivos adjuntos"/>
                         <ToggleButton x:Name="RailObjects" Style="{StaticResource RailIconButton}" Content="&#xE81E;" Click="RailButton_Click" ToolTip="Objetos de la página"/>
                     </StackPanel>
                 </Border>
@@ -335,7 +364,10 @@
                                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
                                 <ListBox.ContextMenu>
                                     <ContextMenu>
+                                        <MenuItem Header="Insertar página en blanco" Click="BtnInsertBlankPage_Click"/>
+                                        <MenuItem Header="Recortar página..." Click="BtnCropPage_Click"/>
                                         <MenuItem Header="Rotar 90° a la derecha" Click="BtnRotatePage_Click"/>
+                                        <Separator/>
                                         <MenuItem Header="Mover página arriba" Click="BtnMoveUp_Click"/>
                                         <MenuItem Header="Mover página abajo" Click="BtnMoveDown_Click"/>
                                         <Separator/>
@@ -364,34 +396,63 @@
                                 </ListBox.ItemTemplate>
                             </ListBox>
 
-                            <!-- Panel 1: Bookmarks -->
-                            <ListBox x:Name="BookmarkList"
-                                     Visibility="Collapsed"
-                                     SelectionChanged="BookmarkList_SelectionChanged"
-                                     BorderThickness="0"
-                                     Background="Transparent"
-                                     Padding="6">
-                                <ListBox.ItemTemplate>
-                                    <DataTemplate>
-                                        <TextBlock Text="{Binding DisplayIndent}" TextTrimming="CharacterEllipsis" Margin="4,4" FontSize="12.5"/>
-                                    </DataTemplate>
-                                </ListBox.ItemTemplate>
-                            </ListBox>
+                            <!-- Panel 1: Collapsible Hierarchical Bookmarks TreeView + Add/Rename/Delete -->
+                            <DockPanel x:Name="BookmarksPanel" Visibility="Collapsed">
+                                <UniformGrid DockPanel.Dock="Top" Columns="3" Margin="8,2,8,8">
+                                    <Button Style="{StaticResource SecondaryButton}" Content="+ Añadir" Padding="4,4" FontSize="11.5" Margin="0,0,3,0" Click="BtnAddBookmark_Click"/>
+                                    <Button Style="{StaticResource SecondaryButton}" Content="Renombrar" Padding="4,4" FontSize="11.5" Margin="2,0,2,0" Click="BtnRenameBookmark_Click"/>
+                                    <Button Style="{StaticResource SecondaryButton}" Content="Eliminar" Padding="4,4" FontSize="11.5" Margin="3,0,0,0" Click="BtnDeleteBookmark_Click"/>
+                                </UniformGrid>
+                                <TreeView x:Name="BookmarkTreeView"
+                                          SelectedItemChanged="BookmarkTreeView_SelectedItemChanged"
+                                          BorderThickness="0"
+                                          Background="Transparent"
+                                          Padding="4">
+                                    <TreeView.ItemTemplate>
+                                        <HierarchicalDataTemplate ItemsSource="{Binding Children}">
+                                            <TextBlock Text="{Binding Title}" TextTrimming="CharacterEllipsis" Margin="2,3" FontSize="12.5"/>
+                                        </HierarchicalDataTemplate>
+                                    </TreeView.ItemTemplate>
+                                </TreeView>
+                            </DockPanel>
 
-                            <!-- Panel 2: Forms -->
+                            <!-- Panel 2: Comments & Annotations -->
+                            <DockPanel x:Name="CommentsPanel" Visibility="Collapsed">
+                                <UniformGrid DockPanel.Dock="Top" Columns="2" Margin="8,2,8,8">
+                                    <Button Style="{StaticResource SecondaryButton}" Content="Editar nota" Padding="6,4" FontSize="11.5" Margin="0,0,3,0" Click="BtnEditAnnotation_Click"/>
+                                    <Button Style="{StaticResource SecondaryButton}" Content="Eliminar" Padding="6,4" FontSize="11.5" Margin="3,0,0,0" Click="BtnDeleteAnnotation_Click"/>
+                                </UniformGrid>
+                                <ListBox x:Name="AnnotationList"
+                                         SelectionChanged="AnnotationList_SelectionChanged"
+                                         MouseDoubleClick="AnnotationList_MouseDoubleClick"
+                                         KeyDown="AnnotationList_KeyDown"
+                                         BorderThickness="0"
+                                         Background="Transparent"
+                                         Padding="6"
+                                         ToolTip="Clic para ir a la página • Doble clic para editar comentario • Supr para eliminar">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Margin="4,4">
+                                                <TextBlock Text="{Binding DisplaySummary}" TextWrapping="Wrap" FontSize="12"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </DockPanel>
+
+                            <!-- Panel 3: Forms -->
                             <DockPanel x:Name="FormsPanel" Visibility="Collapsed">
-                                <Button DockPanel.Dock="Top"
-                                        Style="{StaticResource SecondaryButton}"
-                                        Content="Añadir campo de texto"
-                                        Click="BtnAddTextField_Click"
-                                        Margin="10,2,10,8"/>
+                                <UniformGrid DockPanel.Dock="Top" Columns="2" Margin="8,2,8,8">
+                                    <Button Style="{StaticResource SecondaryButton}" Content="+ Texto" Padding="6,4" FontSize="11.5" Margin="0,0,3,0" Click="BtnAddTextField_Click"/>
+                                    <Button Style="{StaticResource SecondaryButton}" Content="+ Casilla" Padding="6,4" FontSize="11.5" Margin="3,0,0,0" Click="BtnAddCheckboxField_Click"/>
+                                </UniformGrid>
                                 <ListBox x:Name="FormFieldList"
                                          MouseDoubleClick="FormFieldList_MouseDoubleClick"
                                          KeyDown="FormFieldList_KeyDown"
                                          BorderThickness="0"
                                          Background="Transparent"
                                          Padding="6"
-                                         ToolTip="Doble clic para editar valor • Arrastra en la página para mover • Supr para eliminar">
+                                         ToolTip="Clic en la página para rellenar directamente • Arrastra para mover • Supr para eliminar">
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
                                             <StackPanel Margin="6,4">
@@ -403,7 +464,7 @@
                                 </ListBox>
                             </DockPanel>
 
-                            <!-- Panel 3: Signatures -->
+                            <!-- Panel 4: Signatures -->
                             <DockPanel x:Name="SignaturesPanel" Visibility="Collapsed">
                                 <Button DockPanel.Dock="Top"
                                         Style="{StaticResource SecondaryButton}"
@@ -427,7 +488,32 @@
                                 </ListBox>
                             </DockPanel>
 
-                            <!-- Panel 4: Page Objects -->
+                            <!-- Panel 5: Embedded File Attachments -->
+                            <DockPanel x:Name="AttachmentsPanel" Visibility="Collapsed">
+                                <UniformGrid DockPanel.Dock="Top" Columns="3" Margin="8,2,8,8">
+                                    <Button Style="{StaticResource SecondaryButton}" Content="+ Adjuntar" Padding="4,4" FontSize="11.5" Margin="0,0,3,0" Click="BtnAddAttachment_Click"/>
+                                    <Button Style="{StaticResource SecondaryButton}" Content="Guardar" Padding="4,4" FontSize="11.5" Margin="2,0,2,0" Click="BtnSaveAttachment_Click"/>
+                                    <Button Style="{StaticResource SecondaryButton}" Content="Eliminar" Padding="4,4" FontSize="11.5" Margin="3,0,0,0" Click="BtnDeleteAttachment_Click"/>
+                                </UniformGrid>
+                                <ListBox x:Name="AttachmentList"
+                                         MouseDoubleClick="AttachmentList_MouseDoubleClick"
+                                         KeyDown="AttachmentList_KeyDown"
+                                         BorderThickness="0"
+                                         Background="Transparent"
+                                         Padding="6"
+                                         ToolTip="Doble clic para extraer y guardar archivo • Supr para eliminar adjunto">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Margin="6,4">
+                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12.5" TextTrimming="CharacterEllipsis"/>
+                                                <TextBlock Text="{Binding SizeDisplay}" Opacity="0.7" FontSize="11"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+                            </DockPanel>
+
+                            <!-- Panel 6: Page Objects -->
                             <ListBox x:Name="PageObjectList"
                                      Visibility="Collapsed"
                                      MouseDoubleClick="PageObjectList_MouseDoubleClick"
@@ -435,7 +521,7 @@
                                      BorderThickness="0"
                                      Background="Transparent"
                                      Padding="6"
-                                     ToolTip="Doble clic en un texto para editarlo • Supr para eliminar objeto">
+                                     ToolTip="Doble clic en un texto para editarlo • Arrastra imágenes en la página • Supr para eliminar">
                                 <ListBox.ItemTemplate>
                                     <DataTemplate>
                                         <TextBlock Text="{Binding DisplayLabel}" TextTrimming="CharacterEllipsis" Margin="4,4" FontSize="12"/>
@@ -454,9 +540,14 @@
                         <viewport:PdfPageViewport.ContextMenu>
                             <ContextMenu>
                                 <MenuItem Header="Copiar texto seleccionado" InputGestureText="Ctrl+C" Click="MenuCopy_Click"/>
-                                <MenuItem Header="Buscar en el documento..." InputGestureText="Ctrl+F" Click="BtnToggleSearch_Click"/>
+                                <MenuItem Header="Resaltar selección" Click="MenuMarkupHighlight_Click"/>
+                                <MenuItem Header="Subrayar selección" Click="MenuMarkupUnderline_Click"/>
+                                <MenuItem Header="Tachar selección" Click="MenuMarkupStrikeOut_Click"/>
                                 <Separator/>
+                                <MenuItem Header="Buscar en el documento..." InputGestureText="Ctrl+F" Click="BtnToggleSearch_Click"/>
                                 <MenuItem Header="Ajustar al ancho" Click="BtnFitWidth_Click"/>
+                                <MenuItem Header="Ajustar a la página" Click="BtnFitPage_Click"/>
+                                <MenuItem Header="Recortar página..." Click="BtnCropPage_Click"/>
                                 <MenuItem Header="Rotar página 90°" Click="BtnRotatePage_Click"/>
                                 <Separator/>
                                 <MenuItem Header="Insertar imagen..." Click="BtnInsertImage_Click"/>
@@ -526,10 +617,12 @@
                 <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Width="460">
                     <Image Source="Assets/PDFVisor.png" Width="88" Height="88" HorizontalAlignment="Center" Margin="0,0,0,16"/>
                     <TextBlock Text="PDFVisor" FontSize="26" FontWeight="SemiBold" HorizontalAlignment="Center"/>
-                    <TextBlock Text="Abre un documento o arrastra archivos PDF aquí para empezar"
+                    <TextBlock x:Name="TxtWelcomeSubtitle"
+                               Text="Abre un documento o arrastra archivos PDF aquí para empezar"
                                FontSize="13.5" Opacity="0.72" HorizontalAlignment="Center" Margin="0,6,0,22"/>
 
-                    <Button Content="Abrir documento PDF"
+                    <Button x:Name="BtnWelcomeOpen"
+                            Content="Abrir documento PDF"
                             Style="{StaticResource PrimaryAccentButton}"
                             HorizontalAlignment="Center"
                             Click="BtnOpen_Click"/>
@@ -537,7 +630,8 @@
                     <!-- Recent Documents Card -->
                     <StackPanel x:Name="RecentFilesSection" Margin="0,32,0,0" Visibility="Collapsed">
                         <DockPanel Margin="2,0,2,8">
-                            <Button DockPanel.Dock="Right"
+                            <Button x:Name="BtnWelcomeClear"
+                                    DockPanel.Dock="Right"
                                     Content="Limpiar"
                                     Click="BtnClearRecent_Click"
                                     Background="Transparent"
@@ -545,7 +639,7 @@
                                     Opacity="0.65"
                                     FontSize="12"
                                     Cursor="Hand"/>
-                            <TextBlock Text="Documentos recientes" FontSize="13" FontWeight="SemiBold" Opacity="0.85"/>
+                            <TextBlock x:Name="TxtWelcomeRecent" Text="Documentos recientes" FontSize="13" FontWeight="SemiBold" Opacity="0.85"/>
                         </DockPanel>
                         <Border BorderBrush="#28888888" BorderThickness="1" CornerRadius="6" Padding="4">
                             <ListBox x:Name="RecentFilesList"

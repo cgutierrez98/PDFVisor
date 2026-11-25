@@ -66,6 +66,36 @@ public sealed class PdfDocument : IDisposable
         return idx;
     }
 
+    public int InsertBlankPage(int insertAtIndex, double widthPt = 595.0, double heightPt = 842.0)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_doc_insert_blank_page(_handle.DangerousGetHandle(), insertAtIndex, widthPt, heightPt, out int idx);
+        PdfEngine.ThrowIfFailed(status);
+        return idx;
+    }
+
+    public PvRect GetCropBox(int pageIndex)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_page_get_crop_box(_handle.DangerousGetHandle(), pageIndex, out var box);
+        PdfEngine.ThrowIfFailed(status);
+        return box;
+    }
+
+    public void SetCropBox(int pageIndex, PvRect box)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_page_set_crop_box(_handle.DangerousGetHandle(), pageIndex, ref box);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
+    public void FlattenAll()
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_doc_flatten_all(_handle.DangerousGetHandle());
+        PdfEngine.ThrowIfFailed(status);
+    }
+
     public PvPageSize GetPageSize(int pageIndex)
     {
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
@@ -177,6 +207,71 @@ public sealed class PdfDocument : IDisposable
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
         var status = NativeMethods.pv_page_remove_annot(_handle.DangerousGetHandle(), pageIndex, annotIndex);
         PdfEngine.ThrowIfFailed(status);
+    }
+
+    public IReadOnlyList<PdfAnnotationInfo> GetPageAnnotations(int pageIndex)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_page_get_annotations(_handle.DangerousGetHandle(), pageIndex, out var ptr, out int count);
+        PdfEngine.ThrowIfFailed(status);
+        if (ptr == nint.Zero || count <= 0) return Array.Empty<PdfAnnotationInfo>();
+
+        try
+        {
+            var list = new List<PdfAnnotationInfo>(count);
+            int structSize = Marshal.SizeOf<PvAnnotInfoNative>();
+            for (int i = 0; i < count; i++)
+            {
+                var n = Marshal.PtrToStructure<PvAnnotInfoNative>(ptr + i * structSize);
+                string contents = n.ContentsUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(n.ContentsUtf8) ?? "" : "";
+                list.Add(new PdfAnnotationInfo(pageIndex, n.Index, (PdfAnnotSubtype)n.Subtype, n.Rect, n.ColorRgba, contents));
+            }
+            return list;
+        }
+        finally
+        {
+            NativeMethods.pv_free_annotations(ptr, count);
+        }
+    }
+
+    public int AddTextMarkupAnnotation(int pageIndex, PdfAnnotSubtype subtype, IReadOnlyList<PvRect> quadRects, uint rgba)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        if (quadRects is null || quadRects.Count == 0)
+            throw new ArgumentException("At least one quad rect is required.", nameof(quadRects));
+
+        var arr = quadRects as PvRect[] ?? quadRects.ToArray();
+        var status = NativeMethods.pv_page_add_text_markup_annot(
+            _handle.DangerousGetHandle(), pageIndex, (int)subtype, arr, arr.Length, rgba, out int idx);
+        PdfEngine.ThrowIfFailed(status);
+        return idx;
+    }
+
+    public void UpdateAnnotation(int pageIndex, int annotIndex, PvRect? newRect = null, string? newContents = null, uint? newColorRgba = null)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        nint rectPtr = nint.Zero;
+        try
+        {
+            if (newRect is PvRect r)
+            {
+                rectPtr = Marshal.AllocHGlobal(Marshal.SizeOf<PvRect>());
+                Marshal.StructureToPtr(r, rectPtr, false);
+            }
+            var status = NativeMethods.pv_page_update_annot(
+                _handle.DangerousGetHandle(),
+                pageIndex,
+                annotIndex,
+                rectPtr,
+                newContents,
+                newColorRgba.HasValue ? 1 : 0,
+                newColorRgba ?? 0);
+            PdfEngine.ThrowIfFailed(status);
+        }
+        finally
+        {
+            if (rectPtr != nint.Zero) Marshal.FreeHGlobal(rectPtr);
+        }
     }
 
     public void SaveAs(string destinationPath, bool incremental = false)
@@ -545,6 +640,68 @@ public sealed class PdfDocument : IDisposable
     {
         ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
         var status = NativeMethods.pv_page_move_object(_handle.DangerousGetHandle(), pageIndex, objIndex, dxPt, dyPt);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
+    public void SetImageBounds(int pageIndex, int objIndex, PvRect newRect)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_page_set_image_bounds(_handle.DangerousGetHandle(), pageIndex, objIndex, ref newRect);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
+    public IReadOnlyList<PdfAttachmentInfo> GetAttachments()
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_doc_get_attachments(_handle.DangerousGetHandle(), out var ptr, out int count);
+        PdfEngine.ThrowIfFailed(status);
+        if (ptr == nint.Zero || count <= 0) return Array.Empty<PdfAttachmentInfo>();
+
+        try
+        {
+            var list = new List<PdfAttachmentInfo>(count);
+            int structSize = Marshal.SizeOf<PvAttachmentInfoNative>();
+            for (int i = 0; i < count; i++)
+            {
+                var n = Marshal.PtrToStructure<PvAttachmentInfoNative>(ptr + i * structSize);
+                string name = n.NameUtf8 != nint.Zero ? Marshal.PtrToStringUTF8(n.NameUtf8) ?? "" : "";
+                list.Add(new PdfAttachmentInfo(n.Index, n.SizeBytes, name));
+            }
+            return list;
+        }
+        finally
+        {
+            NativeMethods.pv_free_attachments(ptr, count);
+        }
+    }
+
+    public void AddAttachment(string fileName, byte[] data)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileName);
+        ArgumentNullException.ThrowIfNull(data);
+        unsafe
+        {
+            fixed (byte* ptr = data)
+            {
+                var status = NativeMethods.pv_doc_add_attachment(_handle.DangerousGetHandle(), fileName, ptr, data.Length);
+                PdfEngine.ThrowIfFailed(status);
+            }
+        }
+    }
+
+    public void ExtractAttachment(int index, string destinationPath)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(destinationPath);
+        var status = NativeMethods.pv_doc_extract_attachment(_handle.DangerousGetHandle(), index, destinationPath);
+        PdfEngine.ThrowIfFailed(status);
+    }
+
+    public void DeleteAttachment(int index)
+    {
+        ObjectDisposedException.ThrowIf(_handle.IsClosed, this);
+        var status = NativeMethods.pv_doc_delete_attachment(_handle.DangerousGetHandle(), index);
         PdfEngine.ThrowIfFailed(status);
     }
 

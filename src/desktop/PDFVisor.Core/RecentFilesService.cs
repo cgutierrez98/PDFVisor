@@ -2,14 +2,19 @@ using System.Text.Json;
 
 namespace PDFVisor.Core;
 
-public sealed record RecentFileItem(string FilePath, string FileName, DateTime LastOpenedUtc)
+public sealed record RecentFileItem(
+    string FilePath,
+    string FileName,
+    DateTime LastOpenedUtc,
+    int LastPageIndex = 0,
+    double LastZoom = 0.0)
 {
     public string DirectoryDisplay => Path.GetDirectoryName(FilePath) ?? string.Empty;
 }
 
 public static class RecentFilesService
 {
-    private const int MaxEntries = 10;
+    private const int MaxEntries = 12;
 
     private static string StoragePath =>
         Path.Combine(
@@ -36,15 +41,28 @@ public static class RecentFilesService
         }
     }
 
-    public static IReadOnlyList<RecentFileItem> Record(string filePath)
+    public static RecentFileItem? Find(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath)) return null;
+        string full = Path.GetFullPath(filePath);
+        return Load().FirstOrDefault(i => string.Equals(i.FilePath, full, StringComparison.OrdinalIgnoreCase));
+    }
+
+    public static IReadOnlyList<RecentFileItem> Record(string filePath, int? lastPageIndex = null, double? lastZoom = null)
     {
         if (string.IsNullOrWhiteSpace(filePath)) return Load();
         string full = Path.GetFullPath(filePath);
-        var list = Load()
+        var existingAll = Load();
+        var prev = existingAll.FirstOrDefault(i => string.Equals(i.FilePath, full, StringComparison.OrdinalIgnoreCase));
+
+        var list = existingAll
             .Where(i => !string.Equals(i.FilePath, full, StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        list.Insert(0, new RecentFileItem(full, Path.GetFileName(full), DateTime.UtcNow));
+        int savedPage = lastPageIndex ?? prev?.LastPageIndex ?? 0;
+        double savedZoom = lastZoom ?? prev?.LastZoom ?? 0.0;
+
+        list.Insert(0, new RecentFileItem(full, Path.GetFileName(full), DateTime.UtcNow, savedPage, savedZoom));
         if (list.Count > MaxEntries) list.RemoveRange(MaxEntries, list.Count - MaxEntries);
 
         try

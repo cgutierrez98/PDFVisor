@@ -12,6 +12,10 @@ public sealed class AppSettings
     public bool IsSidebarOpen { get; set; } = true;
     public bool DarkReadingMode { get; set; }
     public double DefaultZoom { get; set; } = 1.0;
+    public string Language { get; set; } = "es";
+    public bool RestoreOpenTabs { get; set; } = true;
+    public List<string> LastOpenTabPaths { get; set; } = [];
+    public int LastActiveTabIndex { get; set; }
 
     public static string DefaultStoragePath =>
         Path.Combine(

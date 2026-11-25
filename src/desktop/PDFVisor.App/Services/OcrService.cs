@@ -16,6 +16,7 @@ public static class OcrService
         string baseDir = AppContext.BaseDirectory;
         string[] candidates =
         [
+            Path.Combine(baseDir, "PDFVisor.OcrWorker.exe"),
             Path.Combine(baseDir, "workers", "PDFVisor.OcrWorker.exe"),
             Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..", "..", "workers", "PDFVisor.OcrWorker", "bin", "Release", "net10.0-windows10.0.19041.0", "PDFVisor.OcrWorker.exe")),
             Path.GetFullPath(Path.Combine(baseDir, "..", "..", "..", "..", "..", "workers", "PDFVisor.OcrWorker", "bin", "Debug", "net10.0-windows10.0.19041.0", "PDFVisor.OcrWorker.exe"))

@@ -464,13 +464,19 @@ public sealed class BatchGeneratedObjectsCommand : IDocumentCommand
 public sealed class SnapshotPdfMutationCommand : IDocumentCommand
 {
     private readonly PdfDocument _doc;
-    private readonly Action<string, string> _qpdfTransform;
+    private readonly Action<string, string, string?> _qpdfTransform;
     private string? _beforeSnapshot;
+    private string? _beforePassword;
     private string? _afterSnapshot;
 
     public string Description { get; }
 
     public SnapshotPdfMutationCommand(PdfDocument doc, string description, Action<string, string> qpdfTransform)
+        : this(doc, description, (src, dst, _) => qpdfTransform(src, dst))
+    {
+    }
+
+    public SnapshotPdfMutationCommand(PdfDocument doc, string description, Action<string, string, string?> qpdfTransform)
     {
         _doc = doc;
         Description = description;
@@ -481,6 +487,7 @@ public sealed class SnapshotPdfMutationCommand : IDocumentCommand
     {
         if (_beforeSnapshot is null)
         {
+            _beforePassword = _doc.ActivePassword;
             _beforeSnapshot = Path.Combine(Path.GetTempPath(), $"pdfvisor_snap_before_{Guid.NewGuid():N}.pdf");
             _doc.SaveAs(_beforeSnapshot, incremental: false);
         }
@@ -488,7 +495,7 @@ public sealed class SnapshotPdfMutationCommand : IDocumentCommand
         if (_afterSnapshot is null || !File.Exists(_afterSnapshot))
         {
             _afterSnapshot = Path.Combine(Path.GetTempPath(), $"pdfvisor_snap_after_{Guid.NewGuid():N}.pdf");
-            _qpdfTransform(_beforeSnapshot, _afterSnapshot);
+            _qpdfTransform(_beforeSnapshot, _afterSnapshot, _beforePassword);
         }
 
         _doc.LoadWorkingCopy(_afterSnapshot, workingPassword: null);
@@ -498,7 +505,7 @@ public sealed class SnapshotPdfMutationCommand : IDocumentCommand
     {
         if (_beforeSnapshot is null || !File.Exists(_beforeSnapshot))
             throw new InvalidOperationException("Snapshot not available for Undo.");
-        _doc.LoadWorkingCopy(_beforeSnapshot, workingPassword: null);
+        _doc.LoadWorkingCopy(_beforeSnapshot, workingPassword: _beforePassword);
     }
 
     public void Dispose()
@@ -512,6 +519,196 @@ public sealed class SnapshotPdfMutationCommand : IDocumentCommand
         {
             try { File.Delete(_afterSnapshot); } catch { }
             _afterSnapshot = null;
+        }
+    }
+}
+
+public sealed class InsertBlankPageCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly int _insertIndex;
+    private readonly double _widthPt;
+    private readonly double _heightPt;
+    private int _actualIndex = -1;
+
+    public string Description => $"Insertar página en blanco ({_insertIndex + 1})";
+
+    public InsertBlankPageCommand(PdfDocument doc, int insertIndex, double widthPt, double heightPt)
+    {
+        _doc = doc;
+        _insertIndex = insertIndex;
+        _widthPt = widthPt;
+        _heightPt = heightPt;
+    }
+
+    public void Execute() => _actualIndex = _doc.InsertBlankPage(_insertIndex, _widthPt, _heightPt);
+    public void Undo() { if (_actualIndex >= 0 && _doc.PageCount > 1) _doc.DeletePage(_actualIndex); }
+    public void Dispose() { }
+}
+
+public sealed class CropPageCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly int _pageIndex;
+    private readonly PvRect _oldBox;
+    private readonly PvRect _newBox;
+
+    public string Description => $"Recortar página {_pageIndex + 1}";
+
+    public CropPageCommand(PdfDocument doc, int pageIndex, PvRect newBox)
+    {
+        _doc = doc;
+        _pageIndex = pageIndex;
+        _oldBox = doc.GetCropBox(pageIndex);
+        _newBox = newBox;
+    }
+
+    public void Execute() => _doc.SetCropBox(_pageIndex, _newBox);
+    public void Undo() => _doc.SetCropBox(_pageIndex, _oldBox);
+    public void Dispose() { }
+}
+
+public sealed class AddTextMarkupCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly int _pageIndex;
+    private readonly PdfAnnotSubtype _subtype;
+    private readonly IReadOnlyList<PvRect> _quads;
+    private readonly uint _rgba;
+    private int _annotIndex = -1;
+
+    public string Description => $"{_subtype} en página {_pageIndex + 1}";
+
+    public AddTextMarkupCommand(PdfDocument doc, int pageIndex, PdfAnnotSubtype subtype, IReadOnlyList<PvRect> quads, uint rgba)
+    {
+        _doc = doc;
+        _pageIndex = pageIndex;
+        _subtype = subtype;
+        _quads = quads;
+        _rgba = rgba;
+    }
+
+    public void Execute() => _annotIndex = _doc.AddTextMarkupAnnotation(_pageIndex, _subtype, _quads, _rgba);
+    public void Undo() { if (_annotIndex >= 0) _doc.RemoveAnnotation(_pageIndex, _annotIndex); }
+    public void Dispose() { }
+}
+
+public sealed class UpdateAnnotationCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly int _pageIndex;
+    private readonly int _annotIndex;
+    private readonly PvRect _oldRect;
+    private readonly string _oldContents;
+    private readonly uint _oldColor;
+    private readonly PvRect? _newRect;
+    private readonly string? _newContents;
+    private readonly uint? _newColor;
+
+    public string Description => $"Editar anotación en página {_pageIndex + 1}";
+
+    public UpdateAnnotationCommand(
+        PdfDocument doc,
+        PdfAnnotationInfo existing,
+        PvRect? newRect = null,
+        string? newContents = null,
+        uint? newColor = null)
+    {
+        _doc = doc;
+        _pageIndex = existing.PageIndex;
+        _annotIndex = existing.Index;
+        _oldRect = existing.Rect;
+        _oldContents = existing.Contents;
+        _oldColor = existing.ColorRgba;
+        _newRect = newRect;
+        _newContents = newContents;
+        _newColor = newColor;
+    }
+
+    public void Execute() => _doc.UpdateAnnotation(_pageIndex, _annotIndex, _newRect, _newContents, _newColor);
+    public void Undo() => _doc.UpdateAnnotation(_pageIndex, _annotIndex, _oldRect, _oldContents, _oldColor);
+    public void Dispose() { }
+}
+
+public sealed class ResizeImageObjectCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly int _pageIndex;
+    private readonly int _objIndex;
+    private readonly PvRect _oldBounds;
+    private readonly PvRect _newBounds;
+
+    public string Description => $"Mover/redimensionar imagen en página {_pageIndex + 1}";
+
+    public ResizeImageObjectCommand(PdfDocument doc, int pageIndex, int objIndex, PvRect oldBounds, PvRect newBounds)
+    {
+        _doc = doc;
+        _pageIndex = pageIndex;
+        _objIndex = objIndex;
+        _oldBounds = oldBounds;
+        _newBounds = newBounds;
+    }
+
+    public void Execute() => _doc.SetImageBounds(_pageIndex, _objIndex, _newBounds);
+    public void Undo() => _doc.SetImageBounds(_pageIndex, _objIndex, _oldBounds);
+    public void Dispose() { }
+}
+
+public sealed class SnapshotInMemoryMutationCommand : IDocumentCommand
+{
+    private readonly PdfDocument _doc;
+    private readonly Action<PdfDocument> _mutation;
+    private string? _beforePath;
+    private string? _afterPath;
+    private string? _snapshotPassword;
+
+    public string Description { get; }
+
+    public SnapshotInMemoryMutationCommand(PdfDocument doc, string description, Action<PdfDocument> mutation)
+    {
+        _doc = doc;
+        Description = description;
+        _mutation = mutation;
+    }
+
+    public void Execute()
+    {
+        if (_beforePath is null)
+        {
+            _snapshotPassword = _doc.ActivePassword;
+            _beforePath = Path.Combine(Path.GetTempPath(), $"pdfvisor_mem_before_{Guid.NewGuid():N}.pdf");
+            _doc.SaveAs(_beforePath, incremental: false);
+        }
+
+        if (_afterPath is null || !File.Exists(_afterPath))
+        {
+            _mutation(_doc);
+            _afterPath = Path.Combine(Path.GetTempPath(), $"pdfvisor_mem_after_{Guid.NewGuid():N}.pdf");
+            _doc.SaveAs(_afterPath, incremental: false);
+        }
+        else
+        {
+            _doc.LoadWorkingCopy(_afterPath, workingPassword: _snapshotPassword);
+        }
+    }
+
+    public void Undo()
+    {
+        if (_beforePath is not null && File.Exists(_beforePath))
+            _doc.LoadWorkingCopy(_beforePath, workingPassword: _snapshotPassword);
+    }
+
+    public void Dispose()
+    {
+        if (_beforePath is not null && File.Exists(_beforePath))
+        {
+            try { File.Delete(_beforePath); } catch { }
+            _beforePath = null;
+        }
+        if (_afterPath is not null && File.Exists(_afterPath))
+        {
+            try { File.Delete(_afterPath); } catch { }
+            _afterPath = null;
         }
     }
 }

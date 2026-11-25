@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "0.8.0",
+    [string]$Version = "1.4.0",
     [switch]$SelfContained = $true,
     [string]$OutputDir = "$PSScriptRoot\..\dist\win-x64"
 )
@@ -26,21 +26,23 @@ if (Test-Path $OutputDir) { Remove-Item $OutputDir -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 $scFlag = if ($SelfContained) { "true" } else { "false" }
+
+# Publish OcrWorker first into the same $OutputDir so both executables share one single .NET 10 runtime (~80 MB saved!)
+Write-Host "=== 3a. Publishing PDFVisor.OcrWorker (shared runtime) ==="
+dotnet publish "$RepoRoot\src\workers\PDFVisor.OcrWorker\PDFVisor.OcrWorker.csproj" `
+    -c Release -r win-x64 --self-contained $scFlag `
+    -p:Version=$Version `
+    -o "$OutputDir"
+if ($LASTEXITCODE -ne 0) { throw "dotnet publish PDFVisor.OcrWorker failed" }
+
+Write-Host "=== 3b. Publishing PDFVisor.App ==="
 dotnet publish "$RepoRoot\src\desktop\PDFVisor.App\PDFVisor.App.csproj" `
     -c Release -r win-x64 --self-contained $scFlag `
     -p:Version=$Version `
     -o "$OutputDir"
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish PDFVisor.App failed" }
 
-Write-Host "=== 4. Publishing PDFVisor.OcrWorker ==="
-$WorkerDir = Join-Path $OutputDir "workers"
-dotnet publish "$RepoRoot\src\workers\PDFVisor.OcrWorker\PDFVisor.OcrWorker.csproj" `
-    -c Release -r win-x64 --self-contained $scFlag `
-    -p:Version=$Version `
-    -o "$WorkerDir"
-if ($LASTEXITCODE -ne 0) { throw "dotnet publish PDFVisor.OcrWorker failed" }
-
-Write-Host "=== 5. Ensuring native DLLs in publish root ==="
+Write-Host "=== 4. Ensuring native DLLs in publish root ==="
 Copy-Item "$RepoRoot\build\src\engine\Release\*.dll" "$OutputDir\" -Force
 
 Write-Host "Publish complete: $OutputDir"

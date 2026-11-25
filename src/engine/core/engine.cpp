@@ -10,6 +10,9 @@
 #include <fpdf_annot.h>
 #include <fpdf_signature.h>
 #include <fpdf_formfill.h>
+#include <fpdf_attachment.h>
+#include <fpdf_flatten.h>
+#include <fpdf_transformpage.h>
 
 #include <algorithm>
 #include <atomic>
@@ -323,7 +326,7 @@ PV_API void pv_engine_shutdown(void) {
 }
 
 PV_API const char* pv_engine_version(void) {
-    return "1.3.0";
+    return "1.4.0";
 }
 
 PV_API const char* pv_get_last_error(void) {
@@ -417,6 +420,110 @@ PV_API pv_status_t pv_doc_append_blank_page(pv_document_handle doc, double width
     FPDF_ClosePage(page);
 
     if (out_page_index) *out_page_index = idx;
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_doc_insert_blank_page(pv_document_handle doc, int32_t insert_at_index, double width_pt, double height_pt, int32_t* out_page_index) {
+    if (!doc || !doc->raw || width_pt <= 0.0 || height_pt <= 0.0) {
+        set_last_error("Invalid arguments to pv_doc_insert_blank_page");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    int count = FPDF_GetPageCount(doc->raw);
+    int idx = std::clamp(insert_at_index, 0, count);
+    FPDF_PAGE page = FPDFPage_New(doc->raw, idx, width_pt, height_pt);
+    if (!page) {
+        set_last_error("FPDFPage_New failed");
+        return PV_ERR_EDIT_FAILED;
+    }
+    FPDFPage_GenerateContent(page);
+    FPDF_ClosePage(page);
+
+    if (out_page_index) *out_page_index = idx;
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_get_crop_box(pv_document_handle doc, int32_t page_index, pv_rect_t* out_box) {
+    if (!doc || !doc->raw || !out_box || page_index < 0) {
+        set_last_error("Invalid arguments to pv_page_get_crop_box");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    float l = 0, b = 0, r = 0, t = 0;
+    if (!FPDFPage_GetCropBox(page, &l, &b, &r, &t)) {
+        if (!FPDFPage_GetMediaBox(page, &l, &b, &r, &t)) {
+            double w = 0, h = 0;
+            FPDF_GetPageSizeByIndex(doc->raw, page_index, &w, &h);
+            l = 0; b = 0; r = static_cast<float>(w); t = static_cast<float>(h);
+        }
+    }
+    FPDF_ClosePage(page);
+    out_box->left = l;
+    out_box->bottom = b;
+    out_box->right = r;
+    out_box->top = t;
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_set_crop_box(pv_document_handle doc, int32_t page_index, const pv_rect_t* box) {
+    if (!doc || !doc->raw || !box || page_index < 0) {
+        set_last_error("Invalid arguments to pv_page_set_crop_box");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    float l = static_cast<float>(std::min(box->left, box->right));
+    float r = static_cast<float>(std::max(box->left, box->right));
+    float b = static_cast<float>(std::min(box->bottom, box->top));
+    float t = static_cast<float>(std::max(box->bottom, box->top));
+    if (r - l < 18.0f || t - b < 18.0f) {
+        set_last_error("Crop box dimensions too small");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+    FPDFPage_SetCropBox(page, l, b, r, t);
+    FPDFPage_GenerateContent(page);
+    FPDF_ClosePage(page);
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_doc_flatten_all(pv_document_handle doc) {
+    if (!doc || !doc->raw) {
+        set_last_error("Invalid arguments to pv_doc_flatten_all");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    if (doc->form_handle) {
+        FPDFDOC_ExitFormFillEnvironment(doc->form_handle);
+        doc->form_handle = nullptr;
+    }
+
+    int count = FPDF_GetPageCount(doc->raw);
+    for (int i = 0; i < count; ++i) {
+        FPDF_PAGE page = FPDF_LoadPage(doc->raw, i);
+        if (!page) continue;
+        int res = FPDFPage_Flatten(page, FLAT_NORMALDISPLAY);
+        if (res == FLATTEN_SUCCESS) {
+            FPDFPage_GenerateContent(page);
+        }
+        FPDF_ClosePage(page);
+    }
+
+    init_doc_form_fill(doc);
     return PV_OK;
 }
 
@@ -848,6 +955,204 @@ PV_API pv_status_t pv_page_remove_annot(
         set_last_error("Failed to remove annotation");
         return PV_ERR_EDIT_FAILED;
     }
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_get_annotations(
+    pv_document_handle doc,
+    int32_t page_index,
+    pv_annot_info_t** out_annots,
+    int32_t* out_count) {
+    if (!doc || !doc->raw || page_index < 0 || !out_annots || !out_count) {
+        set_last_error("Invalid arguments to pv_page_get_annotations");
+        return PV_ERR_INVALID_ARG;
+    }
+    *out_annots = nullptr;
+    *out_count = 0;
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    int count = FPDFPage_GetAnnotCount(page);
+    if (count <= 0) {
+        FPDF_ClosePage(page);
+        return PV_OK;
+    }
+
+    auto* arr = static_cast<pv_annot_info_t*>(std::calloc(static_cast<size_t>(count), sizeof(pv_annot_info_t)));
+    if (!arr) {
+        FPDF_ClosePage(page);
+        set_last_error("Out of memory allocating annotations");
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        arr[i].index = i;
+        FPDF_ANNOTATION annot = FPDFPage_GetAnnot(page, i);
+        if (!annot) continue;
+
+        arr[i].subtype = FPDFAnnot_GetSubtype(annot);
+        FS_RECTF r{};
+        if (FPDFAnnot_GetRect(annot, &r)) {
+            arr[i].rect = pv_rect_t{
+                std::min(r.left, r.right),
+                std::max(r.bottom, r.top),
+                std::max(r.left, r.right),
+                std::min(r.bottom, r.top)
+            };
+        }
+
+        unsigned int cr = 255, cg = 215, cb = 0, ca = 255;
+        if (FPDFAnnot_GetColor(annot, FPDFANNOT_COLORTYPE_Color, &cr, &cg, &cb, &ca)) {
+            arr[i].color_rgba = ((cr & 0xFFu) << 24) | ((cg & 0xFFu) << 16) | ((cb & 0xFFu) << 8) | (ca & 0xFFu);
+        } else {
+            arr[i].color_rgba = 0xFFC107FFu;
+        }
+
+        unsigned long cbytes = FPDFAnnot_GetStringValue(annot, "Contents", nullptr, 0);
+        if (cbytes > 2) {
+            std::vector<unsigned short> wbuf((cbytes / 2) + 1, 0);
+            FPDFAnnot_GetStringValue(annot, "Contents", wbuf.data(), cbytes);
+            std::string utf8 = utf16_to_utf8(wbuf);
+            arr[i].contents_utf8 = static_cast<char*>(std::malloc(utf8.size() + 1));
+            if (arr[i].contents_utf8) std::memcpy(arr[i].contents_utf8, utf8.c_str(), utf8.size() + 1);
+        }
+
+        FPDFPage_CloseAnnot(annot);
+    }
+
+    FPDF_ClosePage(page);
+    *out_annots = arr;
+    *out_count = count;
+    return PV_OK;
+}
+
+PV_API void pv_free_annotations(pv_annot_info_t* annots, int32_t count) {
+    if (!annots) return;
+    for (int32_t i = 0; i < count; ++i) {
+        std::free(annots[i].contents_utf8);
+    }
+    std::free(annots);
+}
+
+PV_API pv_status_t pv_page_add_text_markup_annot(
+    pv_document_handle doc,
+    int32_t page_index,
+    int32_t subtype,
+    const pv_rect_t* quad_rects,
+    int32_t rect_count,
+    uint32_t rgba,
+    int32_t* out_annot_index) {
+    if (!doc || !doc->raw || page_index < 0 || !quad_rects || rect_count <= 0) {
+        set_last_error("Invalid arguments to pv_page_add_text_markup_annot");
+        return PV_ERR_INVALID_ARG;
+    }
+    if (subtype != FPDF_ANNOT_HIGHLIGHT && subtype != FPDF_ANNOT_UNDERLINE && subtype != FPDF_ANNOT_STRIKEOUT) {
+        subtype = FPDF_ANNOT_HIGHLIGHT;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    FPDF_ANNOTATION annot = FPDFPage_CreateAnnot(page, subtype);
+    if (!annot) {
+        FPDF_ClosePage(page);
+        set_last_error("Failed to create text markup annotation");
+        return PV_ERR_EDIT_FAILED;
+    }
+
+    float min_l = static_cast<float>(std::min(quad_rects[0].left, quad_rects[0].right));
+    float max_r = static_cast<float>(std::max(quad_rects[0].left, quad_rects[0].right));
+    float min_b = static_cast<float>(std::min(quad_rects[0].bottom, quad_rects[0].top));
+    float max_t = static_cast<float>(std::max(quad_rects[0].bottom, quad_rects[0].top));
+
+    for (int32_t i = 0; i < rect_count; ++i) {
+        float l = static_cast<float>(std::min(quad_rects[i].left, quad_rects[i].right));
+        float r = static_cast<float>(std::max(quad_rects[i].left, quad_rects[i].right));
+        float b = static_cast<float>(std::min(quad_rects[i].bottom, quad_rects[i].top));
+        float t = static_cast<float>(std::max(quad_rects[i].bottom, quad_rects[i].top));
+        min_l = std::min(min_l, l);
+        max_r = std::max(max_r, r);
+        min_b = std::min(min_b, b);
+        max_t = std::max(max_t, t);
+
+        FS_QUADPOINTSF quad{l, t, r, t, l, b, r, b};
+        FPDFAnnot_AppendAttachmentPoints(annot, &quad);
+    }
+
+    FS_RECTF bounds{min_l, max_t, max_r, min_b};
+    FPDFAnnot_SetRect(annot, &bounds);
+
+    unsigned int cr, cg, cb, ca;
+    unpack_rgba(rgba, cr, cg, cb, ca);
+    FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, cr, cg, cb, ca);
+
+    int idx = FPDFPage_GetAnnotCount(page) - 1;
+    FPDFPage_CloseAnnot(annot);
+    FPDF_ClosePage(page);
+
+    if (out_annot_index) *out_annot_index = idx;
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_update_annot(
+    pv_document_handle doc,
+    int32_t page_index,
+    int32_t annot_index,
+    const pv_rect_t* new_rect_or_null,
+    const char* new_contents_or_null,
+    int32_t update_color,
+    uint32_t new_rgba) {
+    if (!doc || !doc->raw || page_index < 0 || annot_index < 0) {
+        set_last_error("Invalid arguments to pv_page_update_annot");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    FPDF_ANNOTATION annot = FPDFPage_GetAnnot(page, annot_index);
+    if (!annot) {
+        FPDF_ClosePage(page);
+        set_last_error("Invalid annotation index");
+        return PV_ERR_EDIT_FAILED;
+    }
+
+    if (new_rect_or_null) {
+        float l = static_cast<float>(std::min(new_rect_or_null->left, new_rect_or_null->right));
+        float r = static_cast<float>(std::max(new_rect_or_null->left, new_rect_or_null->right));
+        float b = static_cast<float>(std::min(new_rect_or_null->bottom, new_rect_or_null->top));
+        float t = static_cast<float>(std::max(new_rect_or_null->bottom, new_rect_or_null->top));
+        FS_RECTF fs_rect{l, t, r, b};
+        FPDFAnnot_SetRect(annot, &fs_rect);
+    }
+
+    if (new_contents_or_null) {
+        auto u16 = utf8_to_utf16(new_contents_or_null);
+        FPDFAnnot_SetStringValue(annot, "Contents", u16.data());
+    }
+
+    if (update_color) {
+        unsigned int cr, cg, cb, ca;
+        unpack_rgba(new_rgba, cr, cg, cb, ca);
+        FPDFAnnot_SetAP(annot, FPDF_ANNOT_APPEARANCEMODE_NORMAL, nullptr);
+        FPDFAnnot_SetColor(annot, FPDFANNOT_COLORTYPE_Color, cr, cg, cb, ca);
+    }
+
+    FPDFPage_CloseAnnot(annot);
+    FPDF_ClosePage(page);
     return PV_OK;
 }
 
@@ -1422,6 +1727,182 @@ PV_API pv_status_t pv_page_move_object(
 
     if (!ok) {
         set_last_error("Failed to regenerate content after moving object");
+        return PV_ERR_EDIT_FAILED;
+    }
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_page_set_image_bounds(
+    pv_document_handle doc,
+    int32_t page_index,
+    int32_t obj_index,
+    const pv_rect_t* new_rect) {
+    if (!doc || !doc->raw || page_index < 0 || obj_index < 0 || !new_rect) {
+        set_last_error("Invalid arguments to pv_page_set_image_bounds");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_PAGE page = FPDF_LoadPage(doc->raw, page_index);
+    if (!page) {
+        set_last_error("Invalid page index");
+        return PV_ERR_INVALID_PAGE;
+    }
+
+    FPDF_PAGEOBJECT obj = FPDFPage_GetObject(page, obj_index);
+    if (!obj || FPDFPageObj_GetType(obj) != FPDF_PAGEOBJ_IMAGE) {
+        FPDF_ClosePage(page);
+        set_last_error("Object is not an image");
+        return PV_ERR_EDIT_FAILED;
+    }
+
+    double left = std::min(new_rect->left, new_rect->right);
+    double right = std::max(new_rect->left, new_rect->right);
+    double bottom = std::min(new_rect->bottom, new_rect->top);
+    double top = std::max(new_rect->bottom, new_rect->top);
+    double w = std::max(2.0, right - left);
+    double h = std::max(2.0, top - bottom);
+
+    FPDFImageObj_SetMatrix(obj, w, 0.0, 0.0, h, left, bottom);
+    FPDF_BOOL ok = FPDFPage_GenerateContent(page);
+    FPDF_ClosePage(page);
+    if (!ok) {
+        set_last_error("Failed to regenerate content after resizing image");
+        return PV_ERR_EDIT_FAILED;
+    }
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_doc_get_attachments(
+    pv_document_handle doc,
+    pv_attachment_info_t** out_attachments,
+    int32_t* out_count) {
+    if (!doc || !doc->raw || !out_attachments || !out_count) {
+        set_last_error("Invalid arguments to pv_doc_get_attachments");
+        return PV_ERR_INVALID_ARG;
+    }
+    *out_attachments = nullptr;
+    *out_count = 0;
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    int count = FPDFDoc_GetAttachmentCount(doc->raw);
+    if (count <= 0) return PV_OK;
+
+    auto* arr = static_cast<pv_attachment_info_t*>(std::calloc(static_cast<size_t>(count), sizeof(pv_attachment_info_t)));
+    if (!arr) {
+        set_last_error("Out of memory allocating attachments");
+        return PV_ERR_OUT_OF_MEMORY;
+    }
+
+    for (int i = 0; i < count; ++i) {
+        arr[i].index = i;
+        FPDF_ATTACHMENT att = FPDFDoc_GetAttachment(doc->raw, i);
+        if (!att) continue;
+
+        unsigned long nbytes = FPDFAttachment_GetName(att, nullptr, 0);
+        if (nbytes > 0) {
+            std::vector<unsigned short> wbuf((nbytes / 2) + 1, 0);
+            FPDFAttachment_GetName(att, wbuf.data(), nbytes);
+            std::string utf8 = utf16_to_utf8(wbuf);
+            arr[i].name_utf8 = static_cast<char*>(std::malloc(utf8.size() + 1));
+            if (arr[i].name_utf8) std::memcpy(arr[i].name_utf8, utf8.c_str(), utf8.size() + 1);
+        }
+
+        unsigned long fsize = 0;
+        if (FPDFAttachment_GetFile(att, nullptr, 0, &fsize)) {
+            arr[i].size_bytes = static_cast<int64_t>(fsize);
+        }
+    }
+
+    *out_attachments = arr;
+    *out_count = count;
+    return PV_OK;
+}
+
+PV_API void pv_free_attachments(pv_attachment_info_t* attachments, int32_t count) {
+    if (!attachments) return;
+    for (int32_t i = 0; i < count; ++i) {
+        std::free(attachments[i].name_utf8);
+    }
+    std::free(attachments);
+}
+
+PV_API pv_status_t pv_doc_add_attachment(
+    pv_document_handle doc,
+    const char* name_utf8,
+    const uint8_t* data,
+    int32_t data_len) {
+    if (!doc || !doc->raw || !name_utf8 || *name_utf8 == '\0' || (!data && data_len > 0) || data_len < 0) {
+        set_last_error("Invalid arguments to pv_doc_add_attachment");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    auto name_u16 = utf8_to_utf16(name_utf8);
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    FPDF_ATTACHMENT att = FPDFDoc_AddAttachment(doc->raw, name_u16.data());
+    if (!att) {
+        set_last_error("Failed to add embedded attachment (duplicate name or unsupported)");
+        return PV_ERR_EDIT_FAILED;
+    }
+    if (!FPDFAttachment_SetFile(att, doc->raw, data, static_cast<unsigned long>(data_len))) {
+        set_last_error("Failed to set attachment data");
+        return PV_ERR_EDIT_FAILED;
+    }
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_doc_extract_attachment(
+    pv_document_handle doc,
+    int32_t index,
+    const char* dest_utf8_path) {
+    if (!doc || !doc->raw || index < 0 || !dest_utf8_path || *dest_utf8_path == '\0') {
+        set_last_error("Invalid arguments to pv_doc_extract_attachment");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::vector<uint8_t> buf;
+    {
+        std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+        FPDF_ATTACHMENT att = FPDFDoc_GetAttachment(doc->raw, index);
+        if (!att) {
+            set_last_error("Attachment index out of range");
+            return PV_ERR_INVALID_ARG;
+        }
+        unsigned long out_len = 0;
+        if (!FPDFAttachment_GetFile(att, nullptr, 0, &out_len)) {
+            set_last_error("Failed to query attachment size");
+            return PV_ERR_EDIT_FAILED;
+        }
+        buf.resize(out_len);
+        if (out_len > 0 && !FPDFAttachment_GetFile(att, buf.data(), out_len, &out_len)) {
+            set_last_error("Failed to read attachment payload");
+            return PV_ERR_EDIT_FAILED;
+        }
+    }
+
+    std::ofstream ofs(utf8_to_path(dest_utf8_path), std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) {
+        set_last_error("Could not open destination file for attachment");
+        return PV_ERR_SAVE_FAILED;
+    }
+    if (!buf.empty()) {
+        ofs.write(reinterpret_cast<const char*>(buf.data()), static_cast<std::streamsize>(buf.size()));
+    }
+    ofs.close();
+    return PV_OK;
+}
+
+PV_API pv_status_t pv_doc_delete_attachment(
+    pv_document_handle doc,
+    int32_t index) {
+    if (!doc || !doc->raw || index < 0) {
+        set_last_error("Invalid arguments to pv_doc_delete_attachment");
+        return PV_ERR_INVALID_ARG;
+    }
+
+    std::lock_guard<std::mutex> lock(g_pdfium_mutex);
+    if (!FPDFDoc_DeleteAttachment(doc->raw, index)) {
+        set_last_error("Failed to delete attachment");
         return PV_ERR_EDIT_FAILED;
     }
     return PV_OK;
